@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#221a4e">
+  <title>Kalabalik</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/fredoka.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="spelare.js"></script>
+</head>
+<body class="mobil">
+  <button id="ljudknapp" class="ikonknapp hornknapp" type="button" aria-label="Ljud av eller på">🔊</button>
+
+  <main>
+    <section id="laddar" class="mitten">
+      <p class="undertext">Laddar …</p>
+    </section>
+
+    <section id="anslut" class="anslut" hidden>
+      <h1 class="ordmarke" aria-label="Kalabalik"><span>K</span><span>a</span><span>l</span><span>a</span><span>b</span><span>a</span><span>l</span><span>i</span><span>k</span></h1>
+
+      <form id="anslutform" class="anslut" novalidate>
+        <label class="falt">
+          <span>Koden på TV:n</span>
+          <input id="kod" class="inmatning kodfalt" maxlength="4" required autocomplete="off"
+                 autocapitalize="characters" spellcheck="false" inputmode="text" placeholder="ABCD">
+        </label>
+
+        <label class="falt">
+          <span>Ditt namn</span>
+          <input id="namn" class="inmatning" maxlength="16" required autocomplete="nickname" placeholder="Till exempel Moa">
+        </label>
+
+        <fieldset class="falt">
+          <legend>Hur gammal är du?</legend>
+          <div class="gruppval">
+            <label><input type="radio" name="grupp" value="liten"><span><b>🐣</b>5–7 år</span></label>
+            <label><input type="radio" name="grupp" value="mellan"><span><b>🦊</b>8–12 år</span></label>
+            <label><input type="radio" name="grupp" value="stor"><span><b>🦉</b>13+ år</span></label>
+          </div>
+        </fieldset>
+
+        <fieldset class="falt">
+          <legend>Välj en figur</legend>
+          <div id="avatarval" class="avatarval"></div>
+        </fieldset>
+
+        <p id="fel" class="fel" role="alert"></p>
+        <button class="knapp stor hel">Gå med!</button>
+      </form>
+
+      <p class="ovalank"><a class="diskret" href="ova.html">Öva på utmaningarna</a></p>
+    </section>
+
+    <section id="vantar" class="vantar" hidden>
+      <div id="minavatar" class="stoppavatar"></div>
+      <h1 id="mittnamn"></h1>
+      <p id="mingrupp" class="undertext"></p>
+      <p class="undertext">Titta på TV:n. Spelet börjar snart!</p>
+      <div class="smaknappar">
+        <button id="andra" class="diskret" type="button">Ändra namn eller figur</button>
+        <button id="lamna" class="diskret" type="button">Lämna</button>
+      </div>
+    </section>
+
+    <section id="intro" hidden>
+      <div id="introkort" class="introkort"></div>
+    </section>
+
+    <section id="spel" hidden>
+      <div id="spelyta" class="spelyta"></div>
+    </section>
+
+    <section id="skickat" class="skickat" hidden>
+      <div class="mitten">
+        <h1 id="skickatrubrik">Klart!</h1>
+        <p id="sammanfattning" class="sammanfattning"></p>
+        <p class="undertext prickar">Väntar på de andra</p>
+        <p id="skickatfel" class="fel"></p>
+      </div>
+    </section>
+
+    <section id="resultat" hidden>
+      <div class="mitten">
+        <div id="resultatkort" class="lapp resultatkort"></div>
+        <p id="placeringsrad" class="placeringsrad"></p>
+      </div>
+    </section>
+
+    <section id="slut" hidden>
+      <div class="mitten">
+        <div id="medalj" class="medalj"></div>
+        <p id="slutplats" class="slutplats"></p>
+        <p id="slutpoang" class="undertext"></p>
+        <p class="undertext">Värden kan starta en omgång till.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="dialog" class="lapp"></dialog>
+</body>
+</html>

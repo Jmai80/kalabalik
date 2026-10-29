@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#221a4e">
+  <title>Kalabalik – storskärmen</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/fredoka.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="vard.js"></script>
+</head>
+<body class="tv">
+  <main>
+    <section id="laddar" class="smal">
+      <p class="undertext">Laddar …</p>
+    </section>
+
+    <section id="login" class="smal" hidden>
+      <form id="loginform" class="lapp">
+        <h2>Logga in som värd</h2>
+        <p>Använd samma konto som i Frågesport.</p>
+        <input type="email" id="epost" class="inmatning" placeholder="E-post" required autocomplete="username">
+        <input type="password" id="losen" class="inmatning" placeholder="Lösenord" required autocomplete="current-password">
+        <p id="loginfel" class="fel" role="alert"></p>
+        <button class="knapp">Logga in</button>
+      </form>
+    </section>
+
+    <section id="start" class="smal" hidden>
+      <h1 class="ordmarke" aria-label="Kalabalik"><span>K</span><span>a</span><span>l</span><span>a</span><span>b</span><span>a</span><span>l</span><span>i</span><span>k</span></h1>
+      <button id="skapa" class="knapp stor">Skapa ett rum</button>
+      <p id="startfel" class="fel"></p>
+      <button id="loggaut" class="diskret" type="button">Logga ut</button>
+    </section>
+
+    <section id="lobby" class="lobby" hidden>
+      <h1 class="ordmarke" aria-label="Kalabalik"><span>K</span><span>a</span><span>l</span><span>a</span><span>b</span><span>a</span><span>l</span><span>i</span><span>k</span></h1>
+
+      <div class="anslutpanel">
+        <div id="qr" class="lapp qrlapp"></div>
+        <p class="adress">Skanna, eller gå till <strong id="adress"></strong> och skriv koden</p>
+        <p id="rumskod" class="rumskod" aria-label="Rumskod"></p>
+      </div>
+
+      <div class="spelarpanel">
+        <h2 id="antalspelare">Väntar på spelare</h2>
+        <ul id="spelarbubblor" class="spelarbubblor"></ul>
+      </div>
+
+      <div class="lobbyfot">
+        <div class="rundval" role="group" aria-label="Antal rundor">
+          <span>Rundor</span>
+          <button type="button" data-antal="5">5</button>
+          <button type="button" data-antal="8">8</button>
+          <button type="button" data-antal="12">12</button>
+        </div>
+        <div class="vaxlar">
+          <button id="vaxelljud" class="vaxel" type="button">🔊 Ljud</button>
+          <button id="vaxeltal" class="vaxel" type="button">🗣️ Läs upp frågorna</button>
+        </div>
+        <button id="starta" class="knapp stor mint starta" disabled>Starta!</button>
+        <p id="lobbyfel" class="fel" role="alert"></p>
+        <button id="stangrum" class="diskret" type="button">Stäng rummet</button>
+      </div>
+    </section>
+
+    <section id="tvintro" class="tvintro" hidden>
+      <div id="tvintrokort" class="introkort"></div>
+      <div class="tidstapel introstapel"><i id="introstapel"></i></div>
+    </section>
+
+    <section id="tvspel" hidden>
+      <header class="tvtopp">
+        <span id="spelrunda" class="runda"></span>
+        <span id="speltyp" class="typmarke"></span>
+        <span id="nedrakning" class="nedrakning"></span>
+      </header>
+      <div id="tvinnehall" class="tvinnehall"></div>
+      <footer class="svaradeRad">
+        <span id="svaradeavatarer" class="avatarer"></span>
+        <span id="svaradeantal" class="antal"></span>
+        <button id="hoppa" class="diskret" type="button">Avsluta rundan nu</button>
+      </footer>
+    </section>
+
+    <section id="tvresultat" class="tvresultat" hidden>
+      <header class="tvtopp">
+        <span id="resrunda" class="runda"></span>
+        <span id="restyp" class="typmarke"></span>
+      </header>
+      <div id="facitdel" class="facitdel"></div>
+      <div class="topplistedel">
+        <h2>Ställningen</h2>
+        <ol id="topplista" class="topplista"></ol>
+      </div>
+      <footer class="tvfot">
+        <span id="vantetid" class="vantetid"></span>
+        <button id="avbryt" class="diskret" type="button">Avbryt spelet</button>
+        <button id="paus" class="knapp krita" type="button">Pausa</button>
+        <button id="nasta" class="knapp mint stor" type="button">Nästa runda</button>
+      </footer>
+    </section>
+
+    <section id="tvslut" class="tvslut" hidden>
+      <h1>Och vinnaren är …</h1>
+      <div id="pall" class="pall"></div>
+      <p id="ovriga" class="ovriga"></p>
+      <div class="tvfot">
+        <span class="vantetid">Alla spelare är kvar om ni vill köra igen.</span>
+        <button id="stangrum2" class="diskret" type="button">Stäng rummet</button>
+        <button id="igen" class="knapp mint stor" type="button">Spela igen</button>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="dialog" class="lapp"></dialog>
+</body>
+</html>

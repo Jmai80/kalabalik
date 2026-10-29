@@ -1,0 +1,22 @@
+{
+  "name": "kalabalik-test",
+  "version": "1.0.0",
+  "scripts": {
+    "vendor": "esbuild vendor-src-supabase.mjs --bundle --format=esm --platform=browser --outfile=vendor/supabase.mjs && esbuild vendor-src-qrcode.mjs --bundle --format=esm --platform=browser --outfile=vendor/qrcode.mjs",
+    "server": "node fake-supabase.mjs",
+    "sql": "node sql-test.mjs",
+    "ova": "node ova-test.mjs",
+    "flode": "node flode-test.mjs"
+  },
+  "dependencies": {
+    "@fontsource-variable/fredoka": "^5.3.0",
+    "@supabase/supabase-js": "^2.118.0",
+    "esbuild": "^0.28.2",
+    "pg": "^8.23.1",
+    "playwright": "^1.63.0",
+    "qrcode": "^1.5.4",
+    "ws": "^8.22.0"
+  },
+  "private": true,
+  "type": "module"
+}
