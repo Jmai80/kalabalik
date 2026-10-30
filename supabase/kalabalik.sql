@@ -1012,6 +1012,25 @@ revoke execute on function kb_stada() from public, anon, authenticated;
 select cron.schedule('kb-stadning', '20 3 * * *', $$select kb_stada()$$);
 
 
+-- ---------------------------------------------------------------------
+--  Rum som står mitt i ett spel med utmaningar som inte finns längre
+--  (till exempel action-utmaningarna från första versionen) skickas
+--  tillbaka till lobbyn. Spelarna är kvar.
+-- ---------------------------------------------------------------------
+
+with gamla as (
+  select id from kb_rum
+  where exists (select 1 from unnest(plan) t where not kb_vikter() ? t)
+)
+, bort_svar as (delete from kb_svar where rum_id in (select id from gamla))
+, bort_facit as (delete from kb_hemligt where rum_id in (select id from gamla))
+, nollat as (update kb_spelare set poang = 0 where rum_id in (select id from gamla))
+update kb_rum set
+  status = 'lobby', runda = 0, antal_rundor = 0, plan = '{}', utmaning = null,
+  start_at = null, slut_at = null
+where id in (select id from gamla);
+
+
 -- =====================================================================
 --  INNEHÅLLET
 --  Allt nedan skrivs om varje gång filen körs. Vill du ändra, lägga

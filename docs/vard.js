@@ -130,8 +130,35 @@ async function stangRum() {
 
 // ---------- Rendering ----------
 
+// Ett rum som står mitt i en utmaning som den här versionen inte känner
+// igen (till exempel en action-utmaning från första versionen) skickas
+// tillbaka till lobbyn i stället för att krascha.
+let lobbyMeddelande = "";
+let aterstaller = false;
+
+async function gammaltSpel() {
+  if (aterstaller) return;
+  aterstaller = true;
+  rensaTimers();
+  lobbyMeddelande = "Rummet var mitt i ett spel med en utmaning som inte finns längre och har gått tillbaka till lobbyn. "
+    + "Händer det igen när du startar: kör den senaste kalabalik.sql i SQL Editor.";
+  try {
+    await anropa("kb_till_lobbyn", { p_rum: rum.id });
+  } catch (err) {
+    lobbyMeddelande = err.message;
+    visadNyckel = null;
+    visaLobby();
+  } finally {
+    aterstaller = false;
+  }
+}
+
 function rendera() {
   if (!rum) return;
+  if (["intro", "spel", "resultat"].includes(rum.status) && !UTMANINGAR[rum.utmaning?.typ]) {
+    gammaltSpel();
+    return;
+  }
   const nyckel = `${rum.status}:${rum.runda}`;
   if (nyckel === visadNyckel) {
     ritaSpelare();
@@ -154,7 +181,9 @@ function visaLobby() {
   musik.stoppa();
   ritaSpelare();
   ritaVal();
-  $("lobbyfel").textContent = "";
+  $("lobbyfel").textContent = lobbyMeddelande;
+  lobbyMeddelande = "";
+  $("starta").disabled = spelare.length === 0;
   visa("lobby");
 }
 

@@ -192,6 +192,16 @@ function rendera() {
   if (!rum || !jag) return;
   const nyckel = `${rum.status}:${rum.runda}`;
 
+  // En utmaning som den här versionen inte känner igen: vänta på värden
+  if (["intro", "spel", "resultat"].includes(rum.status) && !UTMANINGAR[rum.utmaning?.typ]) {
+    if (visadNyckel !== nyckel) {
+      visadNyckel = nyckel;
+      avbrytUtmaning();
+      visaVantar();
+    }
+    return;
+  }
+
   if (rum.status === "spel") {
     if (svaratRunda === rum.runda) {
       if (visadNyckel !== `skickat:${rum.runda}`) visaSkickat("");
