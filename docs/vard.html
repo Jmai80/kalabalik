@@ -51,13 +51,12 @@
       <div class="lobbyfot">
         <div class="rundval" role="group" aria-label="Antal rundor">
           <span>Rundor</span>
-          <button type="button" data-antal="5">5</button>
           <button type="button" data-antal="8">8</button>
           <button type="button" data-antal="12">12</button>
+          <button type="button" data-antal="16">16</button>
         </div>
         <div class="vaxlar">
-          <button id="vaxelljud" class="vaxel" type="button">🔊 Ljud</button>
-          <button id="vaxeltal" class="vaxel" type="button">🗣️ Läs upp frågorna</button>
+          <button id="vaxelljud" class="vaxel" type="button">🔊 Ljudeffekter</button>
         </div>
         <button id="starta" class="knapp stor mint starta" disabled>Starta!</button>
         <p id="lobbyfel" class="fel" role="alert"></p>
@@ -74,6 +73,7 @@
       <header class="tvtopp">
         <span id="spelrunda" class="runda"></span>
         <span id="speltyp" class="typmarke"></span>
+        <button id="musikknapp" class="diskret" type="button" hidden>⏸ Pausa musiken</button>
         <span id="nedrakning" class="nedrakning"></span>
       </header>
       <div id="tvinnehall" class="tvinnehall"></div>
@@ -96,6 +96,7 @@
       </div>
       <footer class="tvfot">
         <span id="vantetid" class="vantetid"></span>
+        <button id="resmusik" class="diskret" type="button" hidden>⏸ Pausa musiken</button>
         <button id="avbryt" class="diskret" type="button">Avbryt spelet</button>
         <button id="paus" class="knapp krita" type="button">Pausa</button>
         <button id="nasta" class="knapp mint stor" type="button">Nästa runda</button>

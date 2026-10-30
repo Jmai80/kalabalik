@@ -94,26 +94,21 @@ await test("interna funktioner går inte att anropa", async () => {
 });
 
 console.log("En hel omgång");
-const SPELA = {
-  async fraga(r, lage) {
-    // Anna svarar rätt direkt, Bo fel, Cia rätt efter en stund.
-    // Facit tar vi fram genom att prova (bara möjligt i testet, via databasen).
-    return { anna: { val: "RÄTT" }, bo: { val: "FEL" }, cia: { val: "RÄTT", vanta: 600 } };
-  },
-};
 
-await vard("kb_starta", { p_rum: rum.id, p_antal: 10 });
+await vard("kb_starta", { p_rum: rum.id, p_antal: 12 });
 let lage = await vard("kb_lage", { p_rum: rum.id });
-await test("planen innehåller alla fem typer och inga dubbletter i rad", async () => {
+const TYPER = ["fraga", "gissaar", "vemsjunger", "narmast", "matte"];
+await test(`planen innehåller alla fem typer och inga dubbletter i rad (${lage.rum.plan.join(" ")})`, async () => {
   const plan = lage.rum.plan;
-  assert.equal(plan.length, 10);
-  for (const t of ["fraga", "matte", "snabbast", "fanga", "bana"]) assert.ok(plan.includes(t), t);
+  assert.equal(plan.length, 12);
+  for (const t of TYPER) assert.ok(plan.includes(t), t);
   for (let i = 1; i < plan.length; i++) assert.notEqual(plan[i], plan[i - 1]);
 });
 await test("utmaningen innehåller inget facit", async () => {
   assert.equal(lage.rum.status, "intro");
   assert.ok(!("facit" in lage.rum.utmaning));
-  assert.ok(!JSON.stringify(lage.rum.utmaning).includes('"svar"'));
+  const text = JSON.stringify(lage.rum.utmaning);
+  assert.ok(!text.includes('"svar"') && !text.includes('"ar"') && !text.includes('"sok"'), text);
 });
 await test("man kan inte svara under introt", async () => {
   await assert.rejects(anna("kb_svara", { p_rum: rum.id, p_runda: 1, p_svar: { val: 0 } }), /Rundan är redan slut/);
@@ -126,50 +121,70 @@ await db.connect();
 const facitFor = async (runda) =>
   (await db.query("select facit from kb_hemligt where rum_id = $1 and runda = $2", [rum.id, runda])).rows[0].facit;
 const vila = (ms) => new Promise((r) => setTimeout(r, ms));
+const sedda = { fraga: new Set(), lat: new Set() };
 
-for (let runda = 1; runda <= 10; runda++) {
+for (let runda = 1; runda <= 12; runda++) {
   lage = await vard("kb_lage", { p_rum: rum.id });
   const u = lage.rum.utmaning;
   sett.add(u.typ);
-  await vard("kb_borja", { p_rum: rum.id });
   const facit = await facitFor(runda);
 
-  if (u.typ === "fraga") {
-    assert.equal(u.alternativ.length >= 2, true);
+  if (u.typ === "gissaar" || u.typ === "vemsjunger") {
+    await test(`runda ${runda} (${u.typ}): bara värden får veta låten (${facit.artist} – ${facit.titel}, ${facit.ar})`, async () => {
+      const m = await vard("kb_musik", { p_rum: rum.id });
+      assert.equal(m.artist, facit.artist);
+      assert.ok(m.sok.length > 3);
+      assert.ok(!("ratt" in m));
+      await assert.rejects(anna("kb_musik", { p_rum: rum.id }), /inte värd/);
+      assert.ok(!sedda.lat.has(facit.titel), "samma låt två gånger");
+      sedda.lat.add(facit.titel);
+    });
+  } else {
+    await test(`runda ${runda} (${u.typ}): kb_musik ger inget`, async () => {
+      assert.equal(await vard("kb_musik", { p_rum: rum.id }), null);
+    });
+  }
+  await vard("kb_borja", { p_rum: rum.id });
+
+  if (u.typ === "fraga" || u.typ === "vemsjunger") {
+    assert.equal(u.alternativ.length, 4);
+    if (u.typ === "vemsjunger") {
+      await test(`runda ${runda}: fyra olika artister (${u.alternativ.join(", ")})`, async () => {
+        assert.equal(new Set(u.alternativ).size, 4);
+        assert.equal(u.alternativ[facit.ratt], facit.artist);
+      });
+    } else {
+      sedda.fraga.add(u.fraga);
+    }
     await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { val: facit.ratt } });
-    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { val: (facit.ratt + 1) % u.alternativ.length } });
+    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { val: (facit.ratt + 1) % 4 } });
     await vila(700);
     await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { val: facit.ratt } });
   } else if (u.typ === "matte") {
-    await test(`runda ${runda}: mattetal per åldersgrupp (${u.tal.liten.text} | ${u.tal.mellan.text} | ${u.tal.stor.text})`, async () => {
-      assert.equal(u.tal.liten.alternativ.length, 4);
-      assert.ok(u.tal.liten.alternativ.includes(facit.liten));
-      assert.equal(new Set(u.tal.liten.alternativ).size, 4);
-    });
     await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tal: facit.stor } });
     await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tal: facit.mellan } });
-    // Cia svarar med de storas facit – fel för henne (om talen råkar vara olika)
     await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tal: facit.liten } });
-  } else if (u.typ === "snabbast") {
-    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { ms: 300 } });
-    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { ms: 350 } });   // 350-80 = 270 → vinner
-    await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tjuvstart: true } });
-  } else if (u.typ === "fanga") {
-    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { traffar: 18, bomber: 1 } });
-    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { traffar: 999, bomber: 0 } }); // fusk → max
-    await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { traffar: "många" } });
-  } else if (u.typ === "bana") {
-    await test(`runda ${runda}: banan har tema och frö`, async () => {
-      assert.ok(["rymd", "skog", "hav"].includes(u.tema));
-      assert.equal(typeof u.fro, "number");
+  } else if (u.typ === "gissaar") {
+    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { ar: facit.ar } });       // exakt
+    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { ar: facit.ar + 3 } });     // 3 år fel, marginal 15
+    await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { ar: facit.ar - 25 } });   // för långt bort
+    await test(`runda ${runda}: årtal måste vara ett tal`, async () => {
+      const d = klient(await loggaIn("anonym"));
+      await d("kb_ga_med", { p_kod: rum.kod, p_namn: `Text${runda}`, p_grupp: "stor", p_avatar: "🐢" });
+      await assert.rejects(d("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { ar: "nittiotal" } }), /årtal/);
+      await vard("kb_sparka", { p_spelare: (await d("kb_lage", { p_rum: rum.id })).jag.id });
     });
-    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { stjarnor: 15, krockar: 2 } });
-    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { stjarnor: 20 } });
-    await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { stjarnor: 7.4 } });
+  } else if (u.typ === "narmast") {
+    await test(`runda ${runda}: närmast-frågan har text och enhet (${u.fraga} [${u.enhet}])`, async () => {
+      assert.ok(u.fraga.length > 5);
+    });
+    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tal: Number(facit.svar) + 5 } });
+    await bo("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tal: Number(facit.svar) - 2 } });
+    await cia("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { tal: Number(facit.svar) + 100 } });
   }
 
   await test(`runda ${runda} (${u.typ}): dubbelsvar ignoreras`, async () => {
-    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { val: 0, tal: 0, ms: 100 } });
+    await anna("kb_svara", { p_rum: rum.id, p_runda: runda, p_svar: { val: 0, tal: 0, ar: 1900 } }).catch(() => {});
   });
   const svarade = (await vard("kb_lage", { p_rum: rum.id })).svarade;
   assert.equal(svarade.length, 3);
@@ -180,25 +195,28 @@ for (let runda = 1; runda <= 10; runda++) {
   const p = Object.fromEntries(res.runda.map((x) => [x.namn, x.poang]));
 
   await test(`runda ${runda} (${u.typ}): poäng ${JSON.stringify(p)}`, async () => {
-    if (u.typ === "fraga") {
+    if (u.typ === "fraga" || u.typ === "vemsjunger") {
       assert.ok(p.Anna > 950, "Anna rätt och snabb");
       assert.equal(p.Bo, 0);
-      assert.ok(p.Cia > 900 && p.Cia < p.Anna + 1, "Cia rätt, lite långsammare men med 2x tid");
+      assert.ok(p.Cia > 900 && p.Cia <= p.Anna, "Cia rätt, lite långsammare men med 2x tid");
     } else if (u.typ === "matte") {
       assert.ok(p.Anna >= 600 && p.Bo >= 600 && p.Cia >= 600);
-    } else if (u.typ === "snabbast") {
-      assert.deepEqual([p.Bo, p.Anna, p.Cia], [1000, 800, 0]);
-    } else if (u.typ === "fanga") {
-      assert.deepEqual([p.Anna, p.Bo, p.Cia], [Math.round(1000 * 16 / 24), 1000, 0]);
-    } else if (u.typ === "bana") {
-      assert.deepEqual([p.Anna, p.Bo, p.Cia], [750, 1000, 350]);
+    } else if (u.typ === "gissaar") {
+      assert.deepEqual([p.Anna, p.Bo, p.Cia], [1000, 800, 0]);
+    } else if (u.typ === "narmast") {
+      assert.deepEqual([p.Bo, p.Anna, p.Cia], [1000, 800, 650]);
     }
   });
 
   const lageEfter = await anna("kb_lage", { p_rum: rum.id });
-  await test(`runda ${runda}: facit syns först i resultatet`, async () => {
+  await test(`runda ${runda}: facit syns i resultatet, men inte söksträngen`, async () => {
     assert.equal(lageEfter.rum.status, "resultat");
-    if (u.typ === "fraga") assert.equal(lageEfter.rum.utmaning.facit.ratt, facit.ratt);
+    const f = lageEfter.rum.utmaning.facit;
+    assert.ok(f, "facit saknas");
+    assert.ok(!("sok" in f));
+    if (u.typ === "fraga") assert.equal(f.ratt, facit.ratt);
+    if (u.typ === "gissaar") assert.equal(f.ar, facit.ar);
+    if (u.typ === "narmast") assert.equal(Number(f.svar), Number(facit.svar));
   });
   await test(`runda ${runda}: för sent svar avvisas`, async () => {
     const d = klient(await loggaIn("anonym"));
@@ -221,6 +239,8 @@ lage = await vard("kb_lage", { p_rum: rum.id });
 await test("efter sista rundan är spelet slut", async () => {
   assert.equal(lage.rum.status, "slut");
   assert.equal(sett.size, 5);
+  const { rows } = await db.query("select array_length(anvanda_fragor, 1) f, array_length(anvanda_latar, 1) l, array_position(anvanda_fragor, null) n from kb_rum where id = $1", [rum.id]);
+  assert.equal(rows[0].n, null, "NULL i listan över använda frågor");
 });
 const slut = await vard("kb_resultat", { p_rum: rum.id });
 await test(`topplistan: ${slut.topplista.map((t) => `${t.placering}. ${t.namn} ${t.poang}`).join(", ")}`, async () => {
@@ -243,6 +263,7 @@ await test("tre rundor räcker för ett kort spel", async () => {
   const l = await vard("kb_lage", { p_rum: rum.id });
   assert.equal(l.rum.plan.length, 3);
   assert.equal(new Set(l.rum.plan).size, 3);
+  assert.ok(!l.rum.plan.some((t) => ["snabbast", "fanga", "bana"].includes(t)));
 });
 await test("spelare kan lämna", async () => {
   await cia("kb_lamna", { p_rum: rum.id });

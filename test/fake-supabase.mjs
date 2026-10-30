@@ -21,6 +21,18 @@ const HEMLIGHET = "test-hemlighet";
 const LOGG = process.env.LOGG === "1";
 
 const pool = new pg.Pool({ ...PG, max: 20 });
+const MUSIKSOK = [];
+
+// 30 sekunder lågmäld ton som "låt" (wav, 8 kHz mono)
+const LJUD = (() => {
+  const hz = 8000, sek = 30, n = hz * sek;
+  const b = Buffer.alloc(44 + n);
+  b.write("RIFF", 0); b.writeUInt32LE(36 + n, 4); b.write("WAVE", 8); b.write("fmt ", 12);
+  b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(hz, 24);
+  b.writeUInt32LE(hz, 28); b.writeUInt16LE(1, 32); b.writeUInt16LE(8, 34); b.write("data", 36); b.writeUInt32LE(n, 40);
+  for (let i = 0; i < n; i++) b[44 + i] = 128 + Math.round(10 * Math.sin((2 * Math.PI * 440 * i) / hz));
+  return b;
+})();
 
 // ---------- JWT ----------
 
@@ -164,6 +176,34 @@ const api = http.createServer(async (req, res) => {
       if (LOGG && status !== 200) console.log("  ->", status, kropp?.message);
       return svara(res, status, kropp);
     }
+
+    // Musikfunktionen (Edge Function "media"). Svarar med låten ur kb_latar,
+    // en liveversion av den och en annan låt, som iTunes brukar göra.
+    // Var femte låt "saknas", så att det testas vad som händer då.
+    if (url.pathname === "/functions/v1/media" && req.method === "POST") {
+      const { sok } = await lasKropp(req);
+      const { rows } = await pool.query(
+        "select * from kb_latar where coalesce(nullif(trim(sok), ''), artist || ' ' || titel) = $1", [sok]);
+      const l = rows[0];
+      MUSIKSOK.push(sok);
+      if (!l || l.id % 5 === 0) return svara(res, 200, []);
+      const bas = { album: "Testskiva", ar: "2015", bild: `http://localhost:${API_PORT}/omslag.svg?t=${encodeURIComponent(l.titel)}`, ljud: `http://localhost:${API_PORT}/ljud.wav?id=${l.id}` };
+      return svara(res, 200, [
+        { ...bas, id: `${l.id}1`, titel: `${l.titel} (Live)`, artist: l.artist, ljud: `http://localhost:${API_PORT}/ljud.wav?fel=live` },
+        { ...bas, id: `${l.id}2`, titel: `${l.titel} - Remastered 2011`, artist: l.artist, album: "Greatest Hits" },
+        { ...bas, id: `${l.id}3`, titel: "Någon helt annan låt", artist: "Okänd artist" },
+      ]);
+    }
+    if (url.pathname === "/ljud.wav") {
+      res.writeHead(200, { ...CORS, "Content-Type": "audio/wav", "Content-Length": LJUD.length });
+      return res.end(LJUD);
+    }
+    if (url.pathname === "/omslag.svg") {
+      const t = (url.searchParams.get("t") ?? "").replace(/[<&>"]/g, "");
+      res.writeHead(200, { ...CORS, "Content-Type": "image/svg+xml" });
+      return res.end(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300"><rect width="300" height="300" fill="#ff73b9"/><circle cx="150" cy="150" r="90" fill="#221a4e"/><text x="150" y="280" font-size="22" text-anchor="middle" font-family="sans-serif" fill="#17112f">${t}</text></svg>`);
+    }
+    if (url.pathname === "/musiksok") return svara(res, 200, MUSIKSOK);
 
     console.error("OKÄNT ANROP:", req.method, url.pathname + url.search);
     return svara(res, 404, { message: `Testservern känner inte till ${url.pathname}` });

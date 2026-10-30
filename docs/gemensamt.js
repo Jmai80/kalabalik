@@ -1,4 +1,4 @@
-// Sånt som både värdskärmen, mobilen och övningsläget använder.
+// Sånt som både storskärmen och mobilen använder.
 
 export const $ = (id) => document.getElementById(id);
 
@@ -24,14 +24,32 @@ export const GRUPPER = {
 };
 
 // ---------- Utmaningstyperna ----------
-// Namn, färg och en kort instruktion som visas (och läses upp) före varje runda.
+// Namn, färg och en kort instruktion som visas före varje runda.
 
 export const TYPER = {
   fraga: {
-    namn: "Frågan",
-    ikon: "❓",
+    namn: "Kunskap",
+    ikon: "🧠",
     farg: "sol",
     instruktion: "Svara rätt så snabbt du kan.",
+  },
+  gissaar: {
+    namn: "Gissa året",
+    ikon: "📻",
+    farg: "rosa",
+    instruktion: "Lyssna på låten. Vilket år kom den?",
+  },
+  vemsjunger: {
+    namn: "Vem sjunger?",
+    ikon: "🎤",
+    farg: "himmel",
+    instruktion: "Lyssna och välj rätt artist.",
+  },
+  narmast: {
+    namn: "Närmast vinner",
+    ikon: "🎯",
+    farg: "tomat",
+    instruktion: "Gissa ett tal. Den som kommer närmast vinner.",
   },
   matte: {
     namn: "Mattedags",
@@ -39,25 +57,19 @@ export const TYPER = {
     farg: "mint",
     instruktion: "Alla får ett tal som passar sin ålder.",
   },
-  snabbast: {
-    namn: "Vem trycker först?",
-    ikon: "🚦",
-    farg: "tomat",
-    instruktion: "Vänta tills skärmen blir grön. Tryck då, så fort du kan!",
-  },
-  fanga: {
-    namn: "Fånga!",
-    ikon: "🐞",
-    farg: "himmel",
-    instruktion: "Tryck på djuren innan de försvinner. Rör inte kaktusarna!",
-  },
-  bana: {
-    namn: "Action-banan",
-    ikon: "🚀",
-    farg: "rosa",
-    instruktion: "Styr åt vänster och höger. Ta stjärnorna och undvik hindren!",
-  },
 };
+
+// Kunskapsfrågornas kategorier
+export const KATEGORIER = {
+  geografi: { namn: "Geografi", ikon: "🌍", farg: "himmel" },
+  underhallning: { namn: "Underhållning", ikon: "🎬", farg: "rosa" },
+  historia: { namn: "Historia", ikon: "📜", farg: "sol" },
+  kultur: { namn: "Kultur och litteratur", ikon: "🎭", farg: "lila" },
+  natur: { namn: "Natur och vetenskap", ikon: "🔬", farg: "mint" },
+  sport: { namn: "Sport och fritid", ikon: "🏅", farg: "orange" },
+};
+
+export const NIVAER = { 1: "Lätt", 2: "Medel", 3: "Svår" };
 
 // Svarsalternativens färger och symboler, samma på storskärmen och mobilen.
 export const SVARSFARGER = [
@@ -167,35 +179,6 @@ export function vibrera(monster) {
   try { navigator.vibrate?.(monster); } catch { /* ok */ }
 }
 
-// ---------- Uppläsning ----------
-
-let lasUpp = true;
-try { lasUpp = localStorage.getItem("kb-las") !== "av"; } catch { /* ok */ }
-
-export const tal = {
-  get pa() { return lasUpp && "speechSynthesis" in window; },
-  vaxla() {
-    lasUpp = !lasUpp;
-    try { localStorage.setItem("kb-las", lasUpp ? "pa" : "av"); } catch { /* ok */ }
-    if (!lasUpp) this.tyst();
-    return lasUpp;
-  },
-  saga(text) {
-    if (!this.pa) return;
-    const s = window.speechSynthesis;
-    s.cancel();
-    const y = new SpeechSynthesisUtterance(text);
-    y.lang = "sv-SE";
-    y.rate = 0.95;
-    const rost = s.getVoices().find((v) => v.lang?.toLowerCase().startsWith("sv"));
-    if (rost) y.voice = rost;
-    s.speak(y);
-  },
-  tyst() {
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  },
-};
-
 // ---------- Konfetti ----------
 
 export function konfetti(antal = 140) {
@@ -286,4 +269,65 @@ export function bekrafta(text, { ok = "OK", avbryt = "Avbryt", farlig = false } 
     // Vid farliga val hamnar markören på den ofarliga knappen
     d.querySelector(farlig ? '[data-svar="nej"]' : '[data-svar="ja"]').focus();
   });
+}
+
+// ---------- Knappsats för tal och årtal ----------
+// Ritar en sifferknappsats i el. Telefonens eget tangentbord används inte,
+// eftersom det täcker halva skärmen och ser olika ut på olika telefoner.
+
+export function knappsats(el, { maxLangd = 6, enhet = "", minVarde = null, maxVarde = null, tusental = true, svara }) {
+  el.insertAdjacentHTML("beforeend", `
+    <output class="matte-svar" aria-live="polite"><span class="varde">?</span>${enhet ? `<span class="enhet">${esc(enhet)}</span>` : ""}</output>
+    <p class="knappsats-fel fel"></p>
+    <div class="knappsats">
+      ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-n="${n}">${n}</button>`).join("")}
+      <button type="button" data-n="sudda" aria-label="Sudda">⌫</button>
+      <button type="button" data-n="0">0</button>
+      <button type="button" data-n="ok" class="ok" disabled>Svara</button>
+    </div>`);
+
+  let varde = "";
+  const ut = el.querySelector(".matte-svar .varde");
+  const ok = el.querySelector(".knappsats .ok");
+  const fel = el.querySelector(".knappsats-fel");
+
+  const rita = () => {
+    ut.textContent = varde ? (tusental ? Number(varde).toLocaleString("sv-SE") : varde) : "?";
+    ok.disabled = varde === "";
+    fel.textContent = "";
+  };
+  const skicka = () => {
+    const tal = Number(varde);
+    if (varde === "") return;
+    if ((minVarde !== null && tal < minVarde) || (maxVarde !== null && tal > maxVarde)) {
+      fel.textContent = `Skriv ett tal mellan ${minVarde} och ${maxVarde}.`;
+      return;
+    }
+    svara(tal);
+  };
+  const tryck = (n) => {
+    if (n === "ok") return skicka();
+    if (n === "sudda") varde = varde.slice(0, -1);
+    else if (varde.length < maxLangd) varde = (varde + n).replace(/^0+(?=\d)/, "");
+    rita();
+  };
+
+  el.querySelector(".knappsats").addEventListener("click", (e) => {
+    const k = e.target.closest("button");
+    if (!k || k.disabled) return;
+    ljud.klick();
+    tryck(k.dataset.n);
+  });
+  const tangent = (e) => {
+    if (/^\d$/.test(e.key)) tryck(e.key);
+    else if (e.key === "Backspace") tryck("sudda");
+    else if (e.key === "Enter") tryck("ok");
+  };
+  document.addEventListener("keydown", tangent);
+  return () => document.removeEventListener("keydown", tangent);
+}
+
+// Tal med mellanslag mellan tusental, som man skriver på svenska
+export function talText(n) {
+  return Number(n).toLocaleString("sv-SE");
 }

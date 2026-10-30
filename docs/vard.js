@@ -5,9 +5,10 @@
 import { supabase } from "./supabase.js";
 import QRCode from "https://esm.sh/qrcode@1";
 import {
-  $, esc, GRUPPER, TYPER, klocka, ljud, tal, konfetti, hallVaken, nedrakning, bekrafta,
+  $, esc, GRUPPER, TYPER, klocka, ljud, konfetti, hallVaken, nedrakning, bekrafta,
 } from "./gemensamt.js";
-import { UTMANINGAR } from "./utmaningar/index.js";
+import { UTMANINGAR, MUSIK } from "./utmaningar/index.js";
+import * as musik from "./musik.js";
 
 const INTRO_MS = 6000;      // hur länge introt visas
 const AUTO_NASTA_S = 15;    // sekunder innan nästa runda startar av sig själv
@@ -16,15 +17,15 @@ const SEKTIONER = ["laddar", "login", "start", "lobby", "tvintro", "tvspel", "tv
 let rum = null;
 let spelare = [];             // [{ id, namn, avatar, grupp, poang }]
 let svarade = new Set();      // spelare som svarat på aktuell runda
-const live = new Map();       // live-värden från mobilerna (fångade djur, stjärnor)
 let kanal = null;
+let lat = null;               // { runda, traff, info, lofte }: låten i aktuell musikrunda
 let visadNyckel = null;
 let modulVy = null;
 let timers = [];
 let stoppNedrakning = null;
 let pausad = false;
-let antalRundor = 8;
-try { antalRundor = Number(localStorage.getItem("kb-rundor")) || 8; } catch { /* ok */ }
+let antalRundor = 12;
+try { antalRundor = Number(localStorage.getItem("kb-rundor")) || 12; } catch { /* ok */ }
 
 function visa(namn) {
   for (const s of SEKTIONER) $(s).hidden = s !== namn;
@@ -92,10 +93,6 @@ async function oppnaRum(r) {
       ritaSvarade();
       kollaOmAllaSvarat();
     })
-    .on("broadcast", { event: "live" }, ({ payload }) => {
-      live.set(payload.id, payload.v);
-      modulVy?.live?.(live);
-    })
     .subscribe((status) => {
       if (status === "SUBSCRIBED") synka();
     });
@@ -123,7 +120,7 @@ async function synka() {
 
 async function stangRum() {
   rensaTimers();
-  tal.tyst();
+  musik.stoppa(false);
   if (kanal) await supabase.removeChannel(kanal);
   kanal = null;
   rum = null;
@@ -154,7 +151,7 @@ function rendera() {
 // ---------- Lobbyn ----------
 
 function visaLobby() {
-  tal.tyst();
+  musik.stoppa();
   ritaSpelare();
   ritaVal();
   $("lobbyfel").textContent = "";
@@ -165,9 +162,7 @@ function ritaVal() {
   document.querySelectorAll(".rundval button").forEach((b) =>
     b.setAttribute("aria-pressed", String(Number(b.dataset.antal) === antalRundor)));
   $("vaxelljud").setAttribute("aria-pressed", String(ljud.pa));
-  $("vaxeltal").setAttribute("aria-pressed", String(tal.pa));
-  $("vaxelljud").textContent = ljud.pa ? "🔊 Ljud" : "🔇 Ljud av";
-  $("vaxeltal").textContent = tal.pa ? "🗣️ Läs upp frågorna" : "🤐 Läs inte upp";
+  $("vaxelljud").textContent = ljud.pa ? "🔊 Ljudeffekter" : "🔇 Inga ljudeffekter";
 }
 
 function ritaSpelare() {
@@ -194,7 +189,8 @@ function visaIntro() {
   const u = rum.utmaning;
   const t = TYPER[u.typ];
   svarade = new Set();
-  live.clear();
+  musik.stoppa();
+  if (MUSIK.has(u.typ)) forberedLat();
   const kort = $("tvintrokort");
   kort.className = `introkort f-${t.farg}`;
   kort.innerHTML = `
@@ -204,7 +200,6 @@ function visaIntro() {
     <p>${esc(t.instruktion)}</p>`;
   visa("tvintro");
   ljud.swoosh();
-  tal.saga(`${t.namn}! ${t.instruktion}`);
 
   const stapel = $("introstapel");
   stoppNedrakning = nedrakning({ slut: Date.now() + INTRO_MS, stapel });
@@ -219,6 +214,70 @@ async function borja() {
   }
 }
 
+// ---------- Musiken ----------
+// Under introt letar storskärmen upp låten och laddar ljudet, så att det
+// kan starta direkt när rundan börjar.
+
+function forberedLat() {
+  const runda = rum.runda;
+  if (lat?.runda === runda) return lat.lofte;
+  const ny = { runda, traff: null, info: null };
+  ny.lofte = (async () => {
+    try {
+      ny.info = await anropa("kb_musik", { p_rum: rum.id });
+      if (ny.info) ny.traff = await musik.forbered(ny.info);
+    } catch {
+      ny.traff = null;
+    }
+    return ny;
+  })();
+  lat = ny;
+  return ny.lofte;
+}
+
+// Visar en rad under skivan när låten inte går att spela
+function musikstatus(text, knapp = false) {
+  const el = $("tvinnehall").querySelector(".musikstatus");
+  if (!el) return;
+  el.hidden = !text;
+  el.innerHTML = text + (knapp ? ` <button type="button" class="knapp krita" id="spelalat">▶ Spela låten</button>` : "");
+}
+
+async function startaMusik() {
+  const runda = rum.runda;
+  const u = rum.utmaning;
+  const l = await Promise.race([forberedLat(), new Promise((r) => setTimeout(() => r(null), 4000))]);
+  if (rum?.runda !== runda || rum.status !== "spel") return;
+
+  if (!l?.traff) {
+    // Låten fanns inte hos iTunes. Då blir det en vanlig fråga i stället.
+    const info = l?.info;
+    if (!info) return musikstatus("Låten gick inte att hämta.");
+    musikstatus(u.typ === "gissaar"
+      ? `Låten gick inte att spela. Det är <b>${esc(info.titel)}</b> med <b>${esc(info.artist)}</b>.`
+      : `Låten gick inte att spela. Den heter <b>${esc(info.titel)}</b>.`);
+    return;
+  }
+  $("tvinnehall").querySelector(".skiva")?.classList.add("snurrar");
+  if (!(await musik.spela())) {
+    musikstatus("Webbläsaren stoppade ljudet.", true);
+  }
+}
+
+$("tvinnehall").addEventListener("click", async (e) => {
+  if (!e.target.closest("#spelalat")) return;
+  if (await musik.spela()) musikstatus("");
+});
+
+musik.narLjudetAndras((spelar) => {
+  $("musikknapp").textContent = spelar ? "⏸ Pausa musiken" : "▶ Spela musiken";
+  document.querySelector(".skiva")?.classList.toggle("snurrar", spelar);
+});
+$("musikknapp").addEventListener("click", () => {
+  if (musik.spelar()) musik.pausa();
+  else musik.fortsatt();
+});
+
 // ---------- Spelet ----------
 
 function visaSpel() {
@@ -226,34 +285,29 @@ function visaSpel() {
   const modul = UTMANINGAR[u.typ];
   $("spelrunda").textContent = `Runda ${rum.runda} av ${rum.antal_rundor}`;
   typMarke($("speltyp"), u.typ);
+  $("musikknapp").hidden = !MUSIK.has(u.typ);
 
   const slut = klocka.lokal(rum.slut_at);
   modulVy = modul.storskarm($("tvinnehall"), { utmaning: u, spelare: [...spelare], slut }) ?? {};
-  modulVy.live?.(live);
   ritaSvarade();
   visa("tvspel");
+  if (MUSIK.has(u.typ)) startaMusik();
 
-  if (u.typ === "fraga") tal.saga(modul.upplasning(u));
-
-  // Utmaningar som mobilen tar tid på har tre extra sekunder i slut_at.
-  // Nedräkningen visar den tid spelarna själva ser.
-  const extra = ["snabbast", "fanga", "bana"].includes(u.typ) ? 3000 : 0;
   const nedEl = $("nedrakning");
   nedEl.classList.remove("brattom");
   stoppNedrakning = nedrakning({
-    slut: slut - extra,
+    slut,
     siffra: nedEl,
     tick: (sek) => {
-      if (u.typ === "fraga" || u.typ === "matte") ljud.tick();
+      if (!MUSIK.has(u.typ)) ljud.tick();
       if (sek <= 5) nedEl.classList.add("brattom");
     },
   });
 
   // setInterval i stället för requestAnimationFrame, så att rundan avslutas
   // även om fliken råkar ligga i bakgrunden
-  const marginal = extra ? 500 : 700;
   timers.push(setInterval(() => {
-    if (Date.now() >= slut + marginal) avslutaRunda();
+    if (Date.now() >= slut + 700) avslutaRunda();
   }, 250));
   kollaOmAllaSvarat();
 }
@@ -287,7 +341,6 @@ async function avslutaRunda() {
 // ---------- Resultatet ----------
 
 async function visaResultat() {
-  tal.tyst();
   const u = rum.utmaning;
   const runda = rum.runda;
   let res;
@@ -300,11 +353,12 @@ async function visaResultat() {
 
   $("resrunda").textContent = `Runda ${rum.runda} av ${rum.antal_rundor}`;
   typMarke($("restyp"), u.typ);
-  UTMANINGAR[u.typ].facit($("facitdel"), u, res);
-  if (u.typ === "snabbast") {
-    $("facitdel").insertAdjacentHTML("beforeend",
-      `<p class="forsprang">${GRUPPER.liten.ikon} har 0,2 sekunders försprång och ${GRUPPER.mellan.ikon} 0,08 sekunder.</p>`);
-  }
+  // Musiken fortsätter spela medan resultatet visas
+  let traff = null;
+  if (MUSIK.has(u.typ)) traff = (await forberedLat())?.traff ?? null;
+  if (rum.status !== "resultat" || rum.runda !== runda) return;
+  UTMANINGAR[u.typ].facit($("facitdel"), u, res, { lat: traff });
+  $("resmusik").hidden = !MUSIK.has(u.typ) || !traff;
 
   const rundpoang = Object.fromEntries(res.runda.map((r) => [r.spelare_id, r.poang]));
   $("topplista").innerHTML = res.topplista.slice(0, 8).map((t) => `
@@ -319,8 +373,7 @@ async function visaResultat() {
   const sista = rum.runda >= rum.antal_rundor;
   $("nasta").textContent = sista ? "Vem vann?" : "Nästa runda";
   visa("tvresultat");
-  ljud.gong();
-  if (u.typ === "fraga") tal.saga(`Rätt svar: ${u.alternativ[u.facit?.ratt] ?? ""}`);
+  if (!MUSIK.has(u.typ)) ljud.gong();
 
   startaAutoNasta();
 }
@@ -358,7 +411,7 @@ async function nasta() {
 // ---------- Slutet ----------
 
 async function visaSlut() {
-  tal.tyst();
+  musik.stoppa();
   let res;
   try {
     res = await anropa("kb_resultat", { p_rum: rum.id });
@@ -385,7 +438,6 @@ async function visaSlut() {
   timers.push(setTimeout(() => {
     konfetti(220);
     ljud.fanfar();
-    if (lista[0]) tal.saga(`Grattis ${lista[0].namn}!`);
   }, 1500));
 }
 
@@ -437,10 +489,6 @@ $("vaxelljud").addEventListener("click", () => {
   ritaVal();
 });
 
-$("vaxeltal").addEventListener("click", () => {
-  if (tal.vaxla()) tal.saga("Jag läser upp frågorna.");
-  ritaVal();
-});
 
 $("starta").addEventListener("click", async () => {
   ljud.vakna();
@@ -504,6 +552,21 @@ async function stangRummet() {
 }
 $("stangrum").addEventListener("click", stangRummet);
 $("stangrum2").addEventListener("click", stangRummet);
+
+// Ljud får bara spelas efter ett klick på sidan. Första klicket låser upp.
+for (const h of ["pointerdown", "keydown"]) {
+  document.addEventListener(h, () => {
+    ljud.vakna();
+    musik.lasUpp();
+  });
+}
+$("resmusik").addEventListener("click", () => {
+  if (musik.spelar()) musik.pausa();
+  else musik.fortsatt();
+});
+musik.narLjudetAndras((spelar) => {
+  $("resmusik").textContent = spelar ? "⏸ Pausa musiken" : "▶ Spela musiken";
+});
 
 // ---------- Uppstart ----------
 

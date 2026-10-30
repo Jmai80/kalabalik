@@ -21,8 +21,6 @@ export async function nySida(browser, { mobil = true, namn = "sida" } = {}) {
   );
   await context.addInitScript(() => {
     window.KB_TEST = { url: "http://localhost:54321", key: "test-nyckel" };
-    // Ingen uppläsning i testerna
-    window.speechSynthesis && (window.speechSynthesis.speak = () => {});
   });
   await context.route("https://esm.sh/**", (route) => {
     const url = route.request().url();

@@ -4,7 +4,6 @@
 
 import { startaWebblasare, nySida, WEBB, SKOTT } from "./webblasare.mjs";
 
-const RUNDOR = Number(process.argv[2] ?? 5);
 const vila = (ms) => new Promise((r) => setTimeout(r, ms));
 const browser = await startaWebblasare();
 const allaFel = [];
@@ -67,95 +66,79 @@ await tv.screenshot({ path: `${SKOTT}/tv-lobby.png` });
 }
 
 // ---------- Spelet ----------
-await tv.click(`.rundval button[data-antal="5"]`);
-// Rundvalet finns bara som 5/8/12. Med ett annat antal startar vi via databasen.
-if (RUNDOR !== 5) {
-  await tv.evaluate(() => localStorage.setItem("kb-rundor", "5"));
-}
+const ljudfiler = [];
+tv.on("request", (r) => { if (r.url().includes("/ljud.wav")) ljudfiler.push(r.url()); });
+
+await tv.click(`.rundval button[data-antal="8"]`);
 await tv.click("#starta");
 
-async function spela(p, typ, runda) {
+async function knappa(p, tal) {
+  for (const n of String(tal)) await p.click(`.knappsats button[data-n="${n}"]`);
+  await p.click(".knappsats .ok");
+}
+
+async function spela(p, typ) {
   const g = p.info.grupp;
-  if (typ === "fraga") {
-    await vila(400 + Math.random() * 1500);
+  await vila(400 + Math.random() * 1200);
+  if (typ === "fraga" || typ === "vemsjunger") {
     await p.click(`.svar >> nth=${Math.floor(Math.random() * 4)}`);
   } else if (typ === "matte") {
-    await vila(500 + Math.random() * 1500);
     if (g === "liten") await p.click(".svar >> nth=0");
-    else {
-      for (const n of ["1", "2"]) await p.click(`.knappsats button[data-n="${n}"]`);
-      await p.click(".knappsats .ok");
+    else await knappa(p, 12);
+  } else if (typ === "gissaar") {
+    if (g === "mellan") {
+      // Ett omöjligt årtal ger ett felmeddelande först
+      await knappa(p, 1234);
+      await p.waitForSelector(".knappsats-fel:not(:empty)");
+      for (let i = 0; i < 4; i++) await p.click('.knappsats button[data-n="sudda"]');
     }
-  } else if (typ === "snabbast") {
-    if (g === "mellan" && runda % 2 === 0) {
-      await vila(500);
-      await p.locator(".snabbknapp").dispatchEvent("pointerdown"); // tjuvstart
-    } else {
-      await p.waitForSelector('.snabbknapp[data-lage="tryck"]', { timeout: 10000 });
-      await vila(150 + Math.random() * 250);
-      await p.locator(".snabbknapp").dispatchEvent("pointerdown");
-    }
-  } else if (typ === "fanga") {
-    const slut = Date.now() + 15500;
-    while (Date.now() < slut) {
-      const djur = p.locator(".fangbar:not(.kaktus):not([data-tagen])");
-      if ((await djur.count()) && Math.random() < 0.7) await djur.first().dispatchEvent("pointerdown").catch(() => {});
-      await vila(200);
-    }
-  } else if (typ === "bana") {
-    const slut = Date.now() + 26000;
-    while (Date.now() < slut) {
-      await p.mouse.click(Math.random() < 0.5 ? 60 : 330, 500).catch(() => {});
-      await vila(300 + Math.random() * 400);
-    }
+    await knappa(p, 1960 + Math.floor(Math.random() * 60));
+  } else if (typ === "narmast") {
+    await knappa(p, 1 + Math.floor(Math.random() * 2000));
   }
 }
 
+const NAMN = { "Kunskap": "fraga", "Gissa året": "gissaar", "Vem sjunger?": "vemsjunger", "Närmast vinner": "narmast", "Mattedags": "matte" };
 const typerSedda = [];
-for (let runda = 1; runda <= 5; runda++) {
+for (let runda = 1; runda <= 8; runda++) {
   await tv.waitForSelector("#tvintro:not([hidden])", { timeout: 20000 });
-  const typ = await tv.evaluate(() => document.querySelector("#tvintrokort").className.match(/f-(\w+)/)?.[1]);
   await vila(800);
-  if (runda <= 5) await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-intro.png` });
-  await mobiler[1].screenshot({ path: `${SKOTT}/mobil-r${runda}-intro.png` });
+  await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-intro.png` });
 
   await tv.waitForSelector("#tvspel:not([hidden])", { timeout: 15000 });
-  const typNamn = await tv.locator("#speltyp").innerText();
-  typerSedda.push(typNamn);
+  const typNamn = (await tv.locator("#speltyp").innerText()).replace(/^\S+\s/, "").trim();
+  const t = NAMN[typNamn];
+  typerSedda.push(t);
   console.log(`Runda ${runda}: ${typNamn}`);
   await Promise.all(mobiler.map((p) => p.waitForSelector("#spel:not([hidden])", { timeout: 10000 })));
-  await vila(900);
-  await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-spel.png` });
-  for (const p of mobiler) await p.screenshot({ path: `${SKOTT}/mobil-r${runda}-${p.info.grupp}-spel.png` });
+  await vila(1500);
+  await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-${t}-spel.png` });
+  for (const p of mobiler) await p.screenshot({ path: `${SKOTT}/mobil-r${runda}-${t}-${p.info.grupp}.png` });
 
-  const typer = { "Frågan": "fraga", "Mattedags": "matte", "Vem trycker först?": "snabbast", "Fånga!": "fanga", "Action-banan": "bana" };
-  const t = typer[typNamn.replace(/^\S+\s/, "").trim()];
-  const mitt = vila(t === "fanga" ? 7000 : t === "bana" ? 12000 : 0).then(async () => {
-    if (t === "fanga" || t === "bana") {
-      await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-live.png` });
-      await mobiler[0].screenshot({ path: `${SKOTT}/mobil-r${runda}-mitt.png` });
-    }
-  });
-  await Promise.all([...mobiler.map((p) => spela(p, t, runda)), mitt]);
+  if (t === "gissaar" || t === "vemsjunger") {
+    const snurrar = await tv.locator(".skiva.snurrar").count();
+    const status = await tv.locator(".musikstatus").innerText().catch(() => "");
+    kolla(snurrar === 1 || /gick inte att spela/.test(status), `musiken: ${snurrar ? "spelar" : status.trim()}`);
+    const okKnapp = await tv.locator("#musikknapp").isVisible();
+    kolla(okKnapp, "pausknappen för musiken syns");
+  }
 
+  await Promise.all(mobiler.map((p) => spela(p, t)));
   await Promise.all(mobiler.map((p) => p.waitForSelector("#skickat:not([hidden]), #resultat:not([hidden])", { timeout: 15000 })));
-  await mobiler[1].screenshot({ path: `${SKOTT}/mobil-r${runda}-skickat.png` });
-  await tv.waitForSelector("#tvresultat:not([hidden])", { timeout: 20000 });
+  await tv.waitForSelector("#tvresultat:not([hidden])", { timeout: 40000 });
   await Promise.all(mobiler.map((p) => p.waitForSelector("#resultat:not([hidden])", { timeout: 10000 })));
-  await vila(900);
-  await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-resultat.png` });
-  for (const p of mobiler) await p.screenshot({ path: `${SKOTT}/mobil-r${runda}-${p.info.grupp}-resultat.png` });
-  const rad = await mobiler[2].locator("#resultatkort").innerText();
-  console.log(`  Sixten: ${rad.replace(/\n+/g, " | ")}`);
+  await vila(1200);
+  await tv.screenshot({ path: `${SKOTT}/tv-r${runda}-${t}-resultat.png` });
+  for (const p of mobiler) await p.screenshot({ path: `${SKOTT}/mobil-r${runda}-${t}-${p.info.grupp}-resultat.png` });
+  const rad = await mobiler[0].locator("#resultatkort").innerText();
+  console.log(`  Farmor: ${rad.replace(/\n+/g, " | ")}`);
 
   if (runda === 2) {
-    // En mobil laddas om mitt i spelet och ska hamna rätt igen
     await mobiler[1].reload();
     await mobiler[1].waitForSelector("#resultat:not([hidden])", { timeout: 10000 });
     kolla(true, "Ella laddade om och kom tillbaka till resultatet");
   }
   if (runda === 3) {
-    // Paus och sedan Nästa för hand
     await tv.click("#paus");
     await vila(500);
     kolla(/Pausat/.test(await tv.locator("#vantetid").innerText()), "pausen stoppar nedräkningen");
@@ -163,12 +146,15 @@ for (let runda = 1; runda <= 5; runda++) {
   await tv.click("#nasta");
 }
 
+kolla(!ljudfiler.some((u) => u.includes("fel=live")), `rätt inspelning valdes (${ljudfiler.length} ljudfiler hämtades)`);
 await tv.waitForSelector("#tvslut:not([hidden])", { timeout: 20000 });
 await Promise.all(mobiler.map((p) => p.waitForSelector("#slut:not([hidden])", { timeout: 10000 })));
 await vila(3500);
 await tv.screenshot({ path: `${SKOTT}/tv-slut.png` });
 for (const p of mobiler) await p.screenshot({ path: `${SKOTT}/mobil-slut-${p.info.grupp}.png` });
 kolla(new Set(typerSedda).size === 5, `alla fem typer kom med: ${typerSedda.join(", ")}`);
+const sokningar = await (await fetch("http://localhost:54321/musiksok")).json();
+console.log(`  musiksökningar: ${sokningar.join(" | ")}`);
 
 // Spela igen: alla hamnar i lobbyn
 await tv.click("#igen");

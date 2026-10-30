@@ -16,8 +16,6 @@ let stadaUtmaning = null;
 let spelarRunda = null;  // rundan som visas just nu
 let svaratRunda = null;  // rundan jag senast skickade svar på
 let visadNyckel = null;  // så att samma läge inte ritas om i onödan
-let liveSenast = 0;
-let liveTimer = null;
 
 function visa(namn) {
   for (const s of SEKTIONER) $(s).hidden = s !== namn;
@@ -186,7 +184,6 @@ async function lamnaRummet(meddelande = "") {
 function avbrytUtmaning() {
   stadaUtmaning?.();
   stadaUtmaning = null;
-  clearTimeout(liveTimer);
 }
 
 // ---------- Lägena ----------
@@ -264,17 +261,6 @@ function startaUtmaning() {
   const slut = rum.slut_at ? klocka.lokal(rum.slut_at) : Date.now() + u.tid * 1000;
   let skickat = false;
 
-  // Den som kommer in mitt i en action-runda hinner inte spela klart den
-  if (["snabbast", "fanga", "bana"].includes(u.typ) && slut - Date.now() < u.tid * 1000) {
-    visadNyckel = `skickat:${runda}`;
-    $("skickatrubrik").textContent = "Strax!";
-    $("sammanfattning").textContent = "Du är med från nästa runda.";
-    $("sammanfattning").hidden = false;
-    $("skickatfel").textContent = "";
-    visa("skickat");
-    return;
-  }
-
   stadaUtmaning = modul.spela(yta, {
     utmaning: u,
     grupp: jag.grupp,
@@ -285,22 +271,7 @@ function startaUtmaning() {
       skickat = true;
       skickaSvar(runda, svar, text);
     },
-    live(varde) {
-      skickaLive(varde);
-    },
   });
-}
-
-// Live-värden (fångade djur, stjärnor) till storskärmen, högst tre gånger i sekunden
-function skickaLive(varde, tvinga = false) {
-  clearTimeout(liveTimer);
-  const skicka = () => {
-    liveSenast = Date.now();
-    kanal?.send({ type: "broadcast", event: "live", payload: { id: jag.id, v: varde } });
-  };
-  const vanta = 330 - (Date.now() - liveSenast);
-  if (tvinga || vanta <= 0) skicka();
-  else liveTimer = setTimeout(skicka, vanta);
 }
 
 async function skickaSvar(runda, svar, text) {
@@ -316,7 +287,7 @@ async function skickaSvar(runda, svar, text) {
 
 function visaSkickat(text) {
   visadNyckel = `skickat:${rum.runda}`;
-  $("skickatrubrik").textContent = "Klart!";
+  $("skickatrubrik").textContent = "Svar skickat!";
   $("sammanfattning").textContent = text;
   $("sammanfattning").hidden = !text;
   $("skickatfel").textContent = "";

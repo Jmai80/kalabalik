@@ -1,7 +1,7 @@
 // Mattedags: varje åldersgrupp får ett eget tal. De minsta räknar frukter
-// och väljer bland fyra svar, de större skriver svaret på en sifferknappsats.
+// och väljer bland fyra svar, de större skriver svaret på en knappsats.
 
-import { esc, ljud, nedrakning, GRUPPER, SVARSFARGER } from "../gemensamt.js";
+import { esc, ljud, nedrakning, knappsats, GRUPPER, SVARSFARGER } from "../gemensamt.js";
 
 const SAKER = ["🍎", "🍓", "🍌", "⭐", "🐟", "🧁"];
 
@@ -11,9 +11,7 @@ function frukter(t) {
     return `<span class="hog">${sak.repeat(t.a)}</span><span class="op">+</span><span class="hog">${sak.repeat(t.b)}</span>`;
   }
   // Minus: alla frukter syns, de som tas bort är överkryssade
-  const kvar = sak.repeat(t.a - t.b);
-  const borta = `<s>${sak.repeat(t.b)}</s>`;
-  return `<span class="hog">${kvar}${borta}</span>`;
+  return `<span class="hog">${sak.repeat(t.a - t.b)}<s>${sak.repeat(t.b)}</s></span>`;
 }
 
 export default {
@@ -21,6 +19,7 @@ export default {
 
   spela(el, { utmaning: u, grupp, slut, klar }) {
     const t = u.tal[grupp];
+    const stopp = [];
 
     if (grupp === "liten") {
       el.innerHTML = `
@@ -46,51 +45,16 @@ export default {
         <div class="tidstapel"><i></i></div>
         <div class="mattekort">
           <p class="matte-tal">${esc(t.text)} =</p>
-          <output class="matte-svar" aria-live="polite">?</output>
-          <div class="knappsats">
-            ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-n="${n}">${n}</button>`).join("")}
-            <button type="button" data-n="sudda" aria-label="Sudda">⌫</button>
-            <button type="button" data-n="0">0</button>
-            <button type="button" data-n="ok" class="ok" disabled>Svara</button>
-          </div>
         </div>`;
-      let varde = "";
-      const ut = el.querySelector(".matte-svar");
-      const ok = el.querySelector(".ok");
-      const rita = () => {
-        ut.textContent = varde || "?";
-        ok.disabled = varde === "";
-      };
-      el.querySelector(".knappsats").addEventListener("click", (e) => {
-        const k = e.target.closest("button");
-        if (!k || k.disabled) return;
-        ljud.klick();
-        const n = k.dataset.n;
-        if (n === "ok") return klar({ tal: Number(varde) }, { visa: `${t.text} = ${varde}` });
-        if (n === "sudda") varde = varde.slice(0, -1);
-        else if (varde.length < 5) varde = (varde + n).replace(/^0+(?=\d)/, "");
-        rita();
-      });
-      const tangent = (e) => {
-        if (/^\d$/.test(e.key) && varde.length < 5) varde = (varde + e.key).replace(/^0+(?=\d)/, "");
-        else if (e.key === "Backspace") varde = varde.slice(0, -1);
-        else if (e.key === "Enter" && varde) return klar({ tal: Number(varde) }, { visa: `${t.text} = ${varde}` });
-        else return;
-        rita();
-      };
-      document.addEventListener("keydown", tangent);
-      const stopp = nedrakning({ slut, stapel: el.querySelector(".tidstapel i") });
-      return () => {
-        stopp();
-        document.removeEventListener("keydown", tangent);
-      };
+      stopp.push(knappsats(el.querySelector(".mattekort"), {
+        maxLangd: 5,
+        tusental: false,
+        svara: (tal) => klar({ tal }, { visa: `${t.text} = ${tal}` }),
+      }));
     }
 
-    return nedrakning({ slut, stapel: el.querySelector(".tidstapel i") });
-  },
-
-  upplasning() {
-    return "Mattedags! Titta på din egen skärm.";
+    stopp.push(nedrakning({ slut, stapel: el.querySelector(".tidstapel i") }));
+    return () => stopp.forEach((f) => f());
   },
 
   storskarm(el, { utmaning: u }) {

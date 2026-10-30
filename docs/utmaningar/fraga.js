@@ -1,9 +1,9 @@
-// Frågan: en flervalsfråga ur frågebanken. Storskärmen visar och läser upp
-// frågan, mobilen visar fyra färgade knappar.
+// Kunskap: en flervalsfråga ur frågebanken, i en av sex kategorier.
+// Storskärmen visar frågan och alternativen, mobilen visar fyra färgade knappar.
 
-import { esc, ljud, nedrakning, SVARSFARGER } from "../gemensamt.js";
+import { esc, ljud, nedrakning, SVARSFARGER, KATEGORIER, NIVAER } from "../gemensamt.js";
 
-function alternativHtml(alternativ, tagg, extra = () => "") {
+export function alternativHtml(alternativ, tagg, extra = () => "") {
   return alternativ
     .map((a, i) => {
       const f = SVARSFARGER[i];
@@ -15,6 +15,21 @@ function alternativHtml(alternativ, tagg, extra = () => "") {
     .join("");
 }
 
+// Avatarerna för dem som valde varje alternativ
+export function vilkaValde(res, i) {
+  return res.runda
+    .filter((r) => r.svar?.val === i)
+    .map((r) => `<span title="${esc(r.namn)}">${esc(r.avatar)}</span>`)
+    .join("");
+}
+
+export function kategoriMarke(u) {
+  const k = KATEGORIER[u.kategori];
+  if (!k) return "";
+  const prickar = u.niva ? `<span class="niva" title="${NIVAER[u.niva]}">${"●".repeat(u.niva)}${"○".repeat(3 - u.niva)}</span>` : "";
+  return `<span class="kategori k-${k.farg}"><span aria-hidden="true">${k.ikon}</span> ${esc(k.namn)}${prickar}</span>`;
+}
+
 export default {
   typ: "fraga",
 
@@ -22,7 +37,7 @@ export default {
     el.innerHTML = `
       <div class="tidstapel"><i></i></div>
       <div class="mobilfraga">
-        <p class="mobilfraga-text"><span class="mobilfraga-emoji">${esc(u.emoji ?? "")}</span>${esc(u.fraga)}</p>
+        <p class="mobilfraga-text">${kategoriMarke(u)}<span class="mobilfraga-emoji">${esc(u.emoji ?? "")}</span>${esc(u.fraga)}</p>
         <div class="svarsknappar antal-${u.alternativ.length}">${alternativHtml(u.alternativ, "button")}</div>
       </div>`;
 
@@ -37,14 +52,10 @@ export default {
     return stopp;
   },
 
-  upplasning(u) {
-    const alt = u.alternativ.map((a, i) => `${SVARSFARGER[i].namn}: ${a}.`).join(" ");
-    return `${u.fraga} ${alt}`;
-  },
-
   storskarm(el, { utmaning: u }) {
     el.innerHTML = `
       <div class="tv-fraga">
+        ${kategoriMarke(u)}
         <div class="tv-emoji" aria-hidden="true">${esc(u.emoji ?? "❓")}</div>
         <h1 class="tv-fragetext">${esc(u.fraga)}</h1>
         <ol class="tv-alternativ antal-${u.alternativ.length}">${alternativHtml(u.alternativ, "li")}</ol>
@@ -54,13 +65,12 @@ export default {
 
   facit(el, u, res) {
     const ratt = u.facit?.ratt;
-    const antal = u.alternativ.map((_, i) => res.runda.filter((r) => r.svar?.val === i));
     el.innerHTML = `
       <div class="tv-fraga facitlage">
-        <div class="tv-emoji liten" aria-hidden="true">${esc(u.emoji ?? "❓")}</div>
+        ${kategoriMarke(u)}
         <h1 class="tv-fragetext liten">${esc(u.fraga)}</h1>
-        <ol class="tv-alternativ antal-${u.alternativ.length}">${alternativHtml(u.alternativ, "li", (i) => `
-          <span class="vilka">${antal[i].map((r) => `<span title="${esc(r.namn)}">${esc(r.avatar)}</span>`).join("")}</span>`)}
+        <ol class="tv-alternativ antal-${u.alternativ.length}">${alternativHtml(u.alternativ, "li", (i) =>
+          `<span class="vilka">${vilkaValde(res, i)}</span>`)}
         </ol>
       </div>`;
     el.querySelectorAll(".tv-alternativ li").forEach((li, i) => li.classList.add(i === ratt ? "ratt" : "fel"));

@@ -3,17 +3,25 @@
 --  Supabase-projekt: wordle (oyhbdwtwtjtskfzwysrc)
 --
 --  Kör hela filen i SQL Editor i wordle-projektet (New query → klistra
---  in → Run). Filen går att köra flera gånger: tabeller som redan finns
---  lämnas orörda, och funktioner, regler och frågor skrivs över med den
---  senaste versionen.
+--  in → Run). Filen går att köra flera gånger. Tabeller som redan finns
+--  behålls, medan funktioner, regler, frågor, låtar och uppskattningar
+--  skrivs över med versionen i den här filen.
 --
 --  Allt heter kb_… så att det hålls isär från Frågesport (quiz_…) och
---  dina andra spel. Kalabalik använder samma värdkonto och samma anonyma
---  inloggning som Frågesport, så inga inställningar behöver ändras.
+--  dina andra spel. Kalabalik använder samma värdkonto, samma anonyma
+--  inloggning och samma musikfunktion (Edge Function "media") som
+--  Frågesport, så inga inställningar behöver ändras.
 --
 --  Grundidé: ingen webbläsare får räkna ut sina egna poäng. Svaren går
 --  till funktionen kb_svara, som jämför med facit (som ligger i en tabell
 --  som ingen kan läsa) och räknar poäng med databasens klocka.
+--
+--  Utmaningarna:
+--    fraga       kunskapsfråga med fyra alternativ, sex kategorier
+--    gissaar     en låt spelas, gissa vilket år den kom
+--    vemsjunger  en låt spelas, välj rätt artist
+--    narmast     gissa ett tal, den som kommer närmast vinner
+--    matte       ett mattetal anpassat efter åldern
 -- =====================================================================
 
 
@@ -103,19 +111,47 @@ create table if not exists kb_fragor (
   niva int not null default 2 check (niva between 1 and 3)
 );
 
+-- Nya kolumner sedan första versionen
+alter table kb_rum add column if not exists anvanda_latar int[] not null default '{}';
+alter table kb_rum add column if not exists anvanda_tal int[] not null default '{}';
+alter table kb_svar add column if not exists avstand numeric;
+
+-- Låtarna till musikutmaningarna. ar är året låten FÖRST kom ut.
+-- sok är vad som skickas till iTunes. Lämnas den tom söks "artist titel".
+create table if not exists kb_latar (
+  id serial primary key,
+  artist text not null,
+  titel text not null,
+  ar int not null check (ar between 1900 and 2100),
+  sok text,
+  unique (artist, titel)
+);
+
+-- Frågorna till "Närmast vinner". svar måste vara ett heltal.
+create table if not exists kb_uppskattningar (
+  id serial primary key,
+  fraga text not null unique,
+  svar bigint not null,
+  enhet text,
+  emoji text
+);
+
 
 -- ---------------------------------------------------------------------
 --  Row Level Security
 --  Allt som ändrar något går via funktionerna längre ned. Policyerna
 --  nedan finns för att värdskärmen och mobilerna ska kunna lyssna på
---  ändringar i realtid.
+--  ändringar i realtid. Frågebanken, låtarna och uppskattningarna har
+--  inga policyer alls, så facit kan inte läsas direkt.
 -- ---------------------------------------------------------------------
 
-alter table kb_rum     enable row level security;
-alter table kb_hemligt enable row level security;
-alter table kb_spelare enable row level security;
-alter table kb_svar    enable row level security;
-alter table kb_fragor  enable row level security;
+alter table kb_rum            enable row level security;
+alter table kb_hemligt        enable row level security;
+alter table kb_spelare        enable row level security;
+alter table kb_svar           enable row level security;
+alter table kb_fragor         enable row level security;
+alter table kb_latar          enable row level security;
+alter table kb_uppskattningar enable row level security;
 
 drop policy if exists "läs rum" on kb_rum;
 create policy "läs rum" on kb_rum for select to authenticated
@@ -158,16 +194,16 @@ end $$;
 --  Här kan du ändra tider och hur mycket hjälp de yngre får.
 -- ---------------------------------------------------------------------
 
--- Hur många sekunder varje utmaning pågår.
+-- Hur många sekunder varje utmaning pågår. Ljudklippen är 30 sekunder.
 create or replace function kb_tid(p_typ text) returns int
 language sql immutable as $$
   select case p_typ
-    when 'fraga'    then 25
-    when 'matte'    then 25
-    when 'snabbast' then 12
-    when 'fanga'    then 15
-    when 'bana'     then 25
-    else 20
+    when 'fraga'      then 25
+    when 'gissaar'    then 30
+    when 'vemsjunger' then 25
+    when 'narmast'    then 30
+    when 'matte'      then 25
+    else 25
   end;
 $$;
 
@@ -179,48 +215,71 @@ language sql immutable as $$
   select case p_grupp when 'liten' then 2.0 when 'mellan' then 1.5 else 1.0 end;
 $$;
 
--- Försprång i "Vem trycker först?", i millisekunder.
-create or replace function kb_forsprang(p_grupp text) returns int
+-- Gissa året: så många år fel får man vara och ändå få poäng.
+-- Exakt rätt ger 1000 poäng, och poängen sjunker jämnt till 0 vid gränsen.
+create or replace function kb_arsmarginal(p_grupp text) returns int
 language sql immutable as $$
-  select case p_grupp when 'liten' then 200 when 'mellan' then 80 else 0 end;
+  select case p_grupp when 'liten' then 20 when 'mellan' then 15 else 10 end;
 $$;
+
+-- Hur ofta varje utmaning kommer. Alla fem kommer med minst en gång
+-- (om omgången är minst fem rundor), resten fördelas efter vikterna.
+create or replace function kb_vikter() returns jsonb
+language sql immutable as $$
+  select '{"fraga": 5, "gissaar": 3, "vemsjunger": 2, "narmast": 2, "matte": 1}'::jsonb;
+$$;
+
+-- Vilken svårighetsgrad kunskapsfrågorna har, i tur och ordning.
+-- 1 = lätt, 2 = medel, 3 = svår.
+create or replace function kb_nivaordning() returns int[]
+language sql immutable as $$
+  select array[2, 1, 2, 3, 2, 1, 3];
+$$;
+
+-- Gamla inställningar från action-utmaningarna
+drop function if exists kb_forsprang(text);
 
 
 -- ---------------------------------------------------------------------
 --  Interna hjälpfunktioner (kan inte anropas från webbläsaren)
 -- ---------------------------------------------------------------------
 
--- Slumpar ordningen på utmaningarna. Alla fem typerna kommer med (om
--- omgången är minst fem rundor lång), frågor är lite vanligare än de
--- andra, och samma typ kommer aldrig två gånger i rad.
+-- Slumpar ordningen på utmaningarna. Samma typ kommer aldrig två gånger i rad.
 create or replace function kb_slumpa_plan(p_antal int)
 returns text[] language plpgsql volatile set search_path = public as $$
 declare
-  typer constant text[] := array['fraga', 'matte', 'snabbast', 'fanga', 'bana'];
-  vikter constant int[] := array[3, 2, 2, 2, 2];
+  vikter constant jsonb := kb_vikter();
+  typer text[];
   pase text[];
   plan text[];
-  slump int;
   summa int;
+  slump int;
+  ack int;
+  t text;
   ok boolean;
 begin
-  select array_agg(t order by random()) into pase from unnest(typer) t;
-  pase := pase[1:least(p_antal, 5)];
+  select array_agg(k order by random()) into typer from jsonb_object_keys(vikter) k;
+  pase := typer[1:least(p_antal, array_length(typer, 1))];
+  select sum(v::int) into summa from jsonb_each_text(vikter) as e(k, v);
 
+  -- Fyll på efter vikterna, men ingen typ får ta mer än halva omgången
   while coalesce(array_length(pase, 1), 0) < p_antal loop
-    slump := floor(random() * 11)::int;
-    summa := 0;
-    for j in 1..5 loop
-      summa := summa + vikter[j];
-      if slump < summa then
-        pase := pase || typer[j];
+    slump := floor(random() * summa)::int;
+    ack := 0;
+    foreach t in array typer loop
+      ack := ack + (vikter ->> t)::int;
+      if slump < ack then
+        if cardinality(array_positions(pase, t)) < greatest(1, p_antal / 2) then
+          pase := pase || t;
+        end if;
         exit;
       end if;
     end loop;
   end loop;
 
-  for forsok in 1..300 loop
-    select array_agg(t order by random()) into plan from unnest(pase) t;
+  -- Blanda tills ingen typ kommer två gånger i rad
+  for forsok in 1..500 loop
+    select array_agg(x order by random()) into plan from unnest(pase) x;
     ok := true;
     for j in 2..p_antal loop
       if plan[j] = plan[j - 1] then
@@ -228,9 +287,19 @@ begin
         exit;
       end if;
     end loop;
-    exit when ok;
+    if ok then return plan; end if;
   end loop;
 
+  -- Om slumpen inte hittade någon ordning: ta alltid den typ som har
+  -- flest kvar och inte kom senast
+  plan := '{}';
+  for j in 1..p_antal loop
+    select x into t from unnest(pase) x
+    where x is distinct from plan[j - 1]
+    group by x order by count(*) desc, random() limit 1;
+    plan := plan || t;
+    pase := pase[1:array_position(pase, t) - 1] || pase[array_position(pase, t) + 1:];
+  end loop;
   return plan;
 end $$;
 
@@ -326,29 +395,36 @@ begin
   return jsonb_build_object('text', text_, 'svar', svar);
 end $$;
 
--- Skapar en utmaning. Returnerar {"publik": …, "facit": …, "fraga_id": …}.
--- "publik" skickas till alla, "facit" sparas i kb_hemligt.
+-- Skapar en utmaning. Returnerar {"publik": …, "facit": …, "anvand": …}.
+-- "publik" skickas till alla, "facit" sparas i kb_hemligt och "anvand"
+-- talar om vilken fråga eller låt som använts, så att den inte kommer igen.
 create or replace function kb_ny_utmaning(p_rum uuid, p_typ text)
 returns jsonb language plpgsql volatile set search_path = public as $$
 declare
   r kb_rum;
   f kb_fragor;
+  l kb_latar;
+  u kb_uppskattningar;
   blandade text[];
   tal_liten jsonb; tal_mellan jsonb; tal_stor jsonb;
+  ordning int[] := kb_nivaordning();
   vald_niva int;
-  falska jsonb;
-  vanta int;
+  senaste text[];
+  artister text[];
   bas jsonb;
 begin
   select * into r from kb_rum where id = p_rum;
   bas := jsonb_build_object('typ', p_typ, 'tid', kb_tid(p_typ));
 
   if p_typ = 'fraga' then
-    -- Växla mellan lätta, mellan och svåra frågor så att alla får en chans
-    vald_niva := (coalesce(array_length(r.anvanda_fragor, 1), 0) % 3) + 1;
+    vald_niva := ordning[(coalesce(array_length(r.anvanda_fragor, 1), 0) % array_length(ordning, 1)) + 1];
+    -- Kategorierna på de två senaste frågorna, så att det blir variation
+    select coalesce(array_agg(kategori), '{}') into senaste from kb_fragor
+    where id = any(r.anvanda_fragor[greatest(1, coalesce(array_length(r.anvanda_fragor, 1), 0) - 1):]);
+
     select * into f from kb_fragor
     where id <> all(r.anvanda_fragor)
-    order by (niva = vald_niva) desc, random()
+    order by (niva = vald_niva) desc, (kategori <> all(senaste)) desc, random()
     limit 1;
     if not found then
       select * into f from kb_fragor order by random() limit 1;
@@ -360,10 +436,70 @@ begin
     select array_agg(x order by random()) into blandade from unnest(f.alternativ) x;
     return jsonb_build_object(
       'publik', bas || jsonb_build_object(
-        'fraga', f.fraga, 'emoji', f.emoji, 'kategori', f.kategori,
+        'fraga', f.fraga, 'emoji', f.emoji, 'kategori', f.kategori, 'niva', f.niva,
         'alternativ', to_jsonb(blandade)),
       'facit', jsonb_build_object('ratt', array_position(blandade, f.alternativ[1]) - 1),
-      'fraga_id', f.id
+      'anvand', jsonb_build_object('fraga', f.id)
+    );
+  end if;
+
+  if p_typ in ('gissaar', 'vemsjunger') then
+    select * into l from kb_latar
+    where id <> all(r.anvanda_latar)
+    order by random() limit 1;
+    if not found then
+      select * into l from kb_latar order by random() limit 1;
+    end if;
+    if not found then
+      raise exception 'Det finns inga låtar';
+    end if;
+
+    if p_typ = 'gissaar' then
+      return jsonb_build_object(
+        'publik', bas,
+        'facit', jsonb_build_object(
+          'artist', l.artist, 'titel', l.titel, 'ar', l.ar,
+          'sok', coalesce(nullif(trim(l.sok), ''), l.artist || ' ' || l.titel)),
+        'anvand', jsonb_build_object('lat', l.id)
+      );
+    end if;
+
+    -- Vem sjunger? Tre andra artister, helst från ungefär samma tid
+    select array_agg(artist) into artister from (
+      select artist from (
+        select distinct on (artist) artist, abs(ar - l.ar) as avstand
+        from kb_latar where artist <> l.artist
+        order by artist, abs(ar - l.ar)
+      ) t
+      order by (avstand <= 8) desc, random()
+      limit 3
+    ) t2;
+    select array_agg(x order by random()) into blandade from unnest(artister || l.artist) x;
+
+    return jsonb_build_object(
+      'publik', bas || jsonb_build_object('alternativ', to_jsonb(blandade)),
+      'facit', jsonb_build_object(
+        'artist', l.artist, 'titel', l.titel, 'ar', l.ar,
+        'sok', coalesce(nullif(trim(l.sok), ''), l.artist || ' ' || l.titel),
+        'ratt', array_position(blandade, l.artist) - 1),
+      'anvand', jsonb_build_object('lat', l.id)
+    );
+  end if;
+
+  if p_typ = 'narmast' then
+    select * into u from kb_uppskattningar
+    where id <> all(r.anvanda_tal)
+    order by random() limit 1;
+    if not found then
+      select * into u from kb_uppskattningar order by random() limit 1;
+    end if;
+    if not found then
+      raise exception 'Det finns inga uppskattningsfrågor';
+    end if;
+    return jsonb_build_object(
+      'publik', bas || jsonb_build_object('fraga', u.fraga, 'enhet', u.enhet, 'emoji', u.emoji),
+      'facit', jsonb_build_object('svar', u.svar),
+      'anvand', jsonb_build_object('tal', u.id)
     );
   end if;
 
@@ -379,39 +515,8 @@ begin
       'facit', jsonb_build_object(
         'liten', tal_liten -> 'svar',
         'mellan', tal_mellan -> 'svar',
-        'stor', tal_stor -> 'svar')
-    );
-  end if;
-
-  if p_typ = 'snabbast' then
-    -- Skärmen är röd en stund och blir sedan grön. Innan dess kan den
-    -- blinka gult för att lura de äldre (de minsta slipper fällorna).
-    vanta := kb_slump(2500, 6000);
-    select coalesce(jsonb_agg(x order by x), '[]') into falska
-    from (
-      select kb_slump(900, vanta - 700) as x
-      from generate_series(1, kb_slump(0, 2))
-    ) t;
-    return jsonb_build_object(
-      'publik', bas || jsonb_build_object('vanta_ms', vanta, 'falska', falska),
-      'facit', '{}'::jsonb
-    );
-  end if;
-
-  if p_typ = 'fanga' then
-    return jsonb_build_object(
-      'publik', bas || jsonb_build_object('fro', kb_slump(1, 999999), 'antal', 24),
-      'facit', jsonb_build_object('max', 24)
-    );
-  end if;
-
-  if p_typ = 'bana' then
-    return jsonb_build_object(
-      'publik', bas || jsonb_build_object(
-        'fro', kb_slump(1, 999999),
-        'tema', (array['rymd', 'skog', 'hav'])[kb_slump(1, 3)],
-        'antal', 20),
-      'facit', jsonb_build_object('max', 20)
+        'stor', tal_stor -> 'svar'),
+      'anvand', '{}'::jsonb
     );
   end if;
 
@@ -445,9 +550,12 @@ begin
     utmaning = ny -> 'publik',
     start_at = null,
     slut_at = null,
-    anvanda_fragor = case
-      when ny ? 'fraga_id' then anvanda_fragor || (ny ->> 'fraga_id')::int
-      else anvanda_fragor end,
+    anvanda_fragor = case when ny #> '{anvand,fraga}' is null then anvanda_fragor
+                          else anvanda_fragor || (ny #>> '{anvand,fraga}')::int end,
+    anvanda_latar = case when ny #> '{anvand,lat}' is null then anvanda_latar
+                         else anvanda_latar || (ny #>> '{anvand,lat}')::int end,
+    anvanda_tal = case when ny #> '{anvand,tal}' is null then anvanda_tal
+                       else anvanda_tal || (ny #>> '{anvand,tal}')::int end,
     aktiv = now()
   where id = p_rum;
 end $$;
@@ -538,8 +646,8 @@ begin
   if r.status not in ('lobby', 'slut') then
     raise exception 'Spelet är redan igång';
   end if;
-  if p_antal not between 3 and 20 then
-    raise exception 'Välj mellan 3 och 20 rundor';
+  if p_antal not between 3 and 30 then
+    raise exception 'Välj mellan 3 och 30 rundor';
   end if;
   if not exists (select 1 from kb_spelare where rum_id = p_rum) then
     raise exception 'Det finns inga spelare i rummet än';
@@ -549,12 +657,12 @@ begin
   delete from kb_hemligt where rum_id = p_rum;
   update kb_spelare set poang = 0 where rum_id = p_rum and poang <> 0;
 
+  -- Frågor och låtar från förra omgången i samma rum kommer inte igen
   update kb_rum set
     runda = 0,
     antal_rundor = p_antal,
     plan = kb_slumpa_plan(p_antal),
-    utmaning = null,
-    anvanda_fragor = '{}'
+    utmaning = null
   where id = p_rum;
 
   perform kb_ga_vidare(p_rum);
@@ -565,24 +673,33 @@ create or replace function kb_borja(p_rum uuid)
 returns void language plpgsql security definer set search_path = public as $$
 declare
   r kb_rum;
-  sek int;
 begin
   r := kb_vardens_rum(p_rum);
   if r.status <> 'intro' then return; end if;
 
-  sek := (r.utmaning ->> 'tid')::int;
-  -- Utmaningar som mobilen själv tar tid på får några extra sekunder,
-  -- så att en mobil som fick signalen lite sent hinner skicka in.
-  if r.utmaning ->> 'typ' in ('snabbast', 'fanga', 'bana') then
-    sek := sek + 3;
-  end if;
-
   update kb_rum set
     status = 'spel',
     start_at = now(),
-    slut_at = now() + make_interval(secs => sek),
+    slut_at = now() + make_interval(secs => (r.utmaning ->> 'tid')::int),
     aktiv = now()
   where id = p_rum;
+end $$;
+
+-- Låten i den aktuella rundan. Bara värdskärmen får veta vilken det är,
+-- så att den kan hämta ljudklippet. Mobilerna får inte se det.
+create or replace function kb_musik(p_rum uuid)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare
+  r kb_rum;
+  facit jsonb;
+begin
+  select * into r from kb_rum where id = p_rum and vard_id = auth.uid();
+  if not found then
+    raise exception 'Rummet finns inte, eller så är du inte värd för det';
+  end if;
+  if r.utmaning ->> 'typ' not in ('gissaar', 'vemsjunger') then return null; end if;
+  select h.facit into facit from kb_hemligt h where h.rum_id = p_rum and h.runda = r.runda;
+  return facit - 'ratt';
 end $$;
 
 -- Tiden är ute eller alla har svarat: räkna ihop rundan
@@ -595,18 +712,19 @@ begin
   r := kb_vardens_rum(p_rum);
   if r.status <> 'spel' then return; end if;
 
-  -- Vem trycker först: placeringen avgör poängen, med försprång för de yngre
-  if r.utmaning ->> 'typ' = 'snabbast' then
-    with giltiga as (
-      select s.id, s.tid_ms - kb_forsprang(p.grupp) as justerad
-      from kb_svar s join kb_spelare p on p.id = s.spelare_id
-      where s.rum_id = p_rum and s.runda = r.runda and s.ratt
-    ),
-    rankade as (
-      select id, rank() over (order by justerad) as plats from giltiga
+  -- Närmast vinner: placeringen avgör poängen. Exakt rätt ger alltid 1000.
+  if r.utmaning ->> 'typ' = 'narmast' then
+    with rankade as (
+      select id, avstand, rank() over (order by avstand) as plats
+      from kb_svar
+      where rum_id = p_rum and runda = r.runda and avstand is not null
     )
-    update kb_svar s set poang = case rankade.plats
-        when 1 then 1000 when 2 then 800 when 3 then 650 when 4 then 500 else 400 end
+    update kb_svar s set
+      ratt = rankade.plats = 1,
+      poang = case
+        when rankade.avstand = 0 then 1000
+        else case rankade.plats when 1 then 1000 when 2 then 800 when 3 then 650 when 4 then 500 else 350 end
+      end
     from rankade where s.id = rankade.id;
   end if;
 
@@ -618,10 +736,7 @@ begin
 
   update kb_rum set
     status = 'resultat',
-    utmaning = case
-      when r.utmaning ->> 'typ' in ('fraga', 'matte')
-      then r.utmaning || jsonb_build_object('facit', facit)
-      else r.utmaning end,
+    utmaning = r.utmaning || jsonb_build_object('facit', facit - 'sok'),
     aktiv = now()
   where id = p_rum;
 end $$;
@@ -649,7 +764,7 @@ begin
   update kb_spelare set poang = 0 where rum_id = p_rum and poang <> 0;
   update kb_rum set
     status = 'lobby', runda = 0, antal_rundor = 0, plan = '{}', utmaning = null,
-    start_at = null, slut_at = null, anvanda_fragor = '{}', aktiv = now()
+    start_at = null, slut_at = null, aktiv = now()
   where id = p_rum;
 end $$;
 
@@ -765,11 +880,9 @@ begin
 end $$;
 
 -- Skicka in ett svar. Här räknas poängen, med databasens klocka.
---   fraga:    {"val": 2}                        (alternativets plats, 0–3)
---   matte:    {"tal": 56}
---   snabbast: {"ms": 312} eller {"tjuvstart": true}
---   fanga:    {"traffar": 17, "bomber": 1}
---   bana:     {"stjarnor": 14, "krockar": 2}
+--   fraga, vemsjunger: {"val": 2}     (alternativets plats, 0–3)
+--   gissaar:           {"ar": 1985}
+--   narmast, matte:    {"tal": 56}
 create or replace function kb_svara(p_rum uuid, p_runda int, p_svar jsonb)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
@@ -781,10 +894,8 @@ declare
   tid_ms int;
   ar_ratt boolean;
   poang int := 0;
-  marginal interval;
-  maxantal int;
-  antal int;
-  minus int;
+  avstand_ numeric;
+  svar_tal numeric;
 begin
   select * into r from kb_rum where id = p_rum;
   if not found then raise exception 'Rummet finns inte'; end if;
@@ -795,59 +906,47 @@ begin
   if r.status <> 'spel' or r.runda <> p_runda then
     raise exception 'Rundan är redan slut';
   end if;
-
-  typ := r.utmaning ->> 'typ';
-  tid := (r.utmaning ->> 'tid')::int;
-  marginal := case when typ in ('fraga', 'matte') then interval '1.5 seconds' else interval '6 seconds' end;
-  if now() > r.slut_at + marginal then
+  if now() > r.slut_at + interval '1.5 seconds' then
     raise exception 'Tiden är ute';
   end if;
 
+  typ := r.utmaning ->> 'typ';
+  tid := (r.utmaning ->> 'tid')::int;
   select h.facit into facit from kb_hemligt h where h.rum_id = p_rum and h.runda = r.runda;
   tid_ms := least(extract(epoch from (now() - r.start_at)) * 1000, tid * 1000)::int;
 
-  if typ in ('fraga', 'matte') then
-    if typ = 'fraga' then
-      ar_ratt := coalesce(jsonb_typeof(p_svar -> 'val') = 'number'
-             and (p_svar ->> 'val')::numeric = (facit ->> 'ratt')::numeric, false);
-    else
+  if typ in ('fraga', 'vemsjunger', 'matte') then
+    if typ = 'matte' then
       ar_ratt := coalesce(jsonb_typeof(p_svar -> 'tal') = 'number'
              and (p_svar ->> 'tal')::numeric = (facit ->> s.grupp)::numeric, false);
+    else
+      ar_ratt := coalesce(jsonb_typeof(p_svar -> 'val') = 'number'
+             and (p_svar ->> 'val')::numeric = (facit ->> 'ratt')::numeric, false);
     end if;
     -- Rätt svar ger 600 poäng, plus upp till 400 i fartbonus
     if ar_ratt then
       poang := 600 + round(400 * greatest(0, 1 - tid_ms / (tid * 1000.0 * kb_tidsfaktor(s.grupp))))::int;
     end if;
 
-  elsif typ = 'snabbast' then
-    -- Mobilen mäter reaktionstiden själv, från grönt till tryck.
-    -- Poängen delas ut i kb_avsluta_runda när alla har tryckt.
-    if coalesce((p_svar ->> 'tjuvstart')::boolean, false)
-       or coalesce(jsonb_typeof(p_svar -> 'ms'), '') <> 'number'
-       or (p_svar ->> 'ms')::numeric < 80 then
-      ar_ratt := false;
-      tid_ms := null;
-    else
-      ar_ratt := true;
-      tid_ms := least((p_svar ->> 'ms')::numeric, 5000)::int;
+  elsif typ = 'gissaar' then
+    if jsonb_typeof(p_svar -> 'ar') <> 'number' then
+      raise exception 'Skriv ett årtal';
     end if;
+    avstand_ := abs((p_svar ->> 'ar')::numeric - (facit ->> 'ar')::numeric);
+    ar_ratt := avstand_ = 0;
+    poang := round(1000 * greatest(0, 1 - avstand_ / kb_arsmarginal(s.grupp)))::int;
 
-  elsif typ = 'fanga' then
-    maxantal := (facit ->> 'max')::int;
-    antal := least(greatest(coalesce(kb_heltal(p_svar -> 'traffar'), 0), 0), maxantal);
-    minus := least(greatest(coalesce(kb_heltal(p_svar -> 'bomber'), 0), 0), 20);
-    poang := round(1000.0 * greatest(antal - 2 * minus, 0) / maxantal)::int;
-    tid_ms := null;
-
-  elsif typ = 'bana' then
-    maxantal := (facit ->> 'max')::int;
-    antal := least(greatest(coalesce(kb_heltal(p_svar -> 'stjarnor'), 0), 0), maxantal);
-    poang := round(1000.0 * antal / maxantal)::int;
-    tid_ms := null;
+  elsif typ = 'narmast' then
+    -- Poängen delas ut i kb_avsluta_runda, när alla har svarat
+    if jsonb_typeof(p_svar -> 'tal') <> 'number' then
+      raise exception 'Skriv ett tal';
+    end if;
+    svar_tal := (p_svar ->> 'tal')::numeric;
+    avstand_ := abs(svar_tal - (facit ->> 'svar')::numeric);
   end if;
 
-  insert into kb_svar (rum_id, spelare_id, runda, svar, ratt, tid_ms, poang)
-  values (p_rum, s.id, r.runda, p_svar, ar_ratt, tid_ms, poang)
+  insert into kb_svar (rum_id, spelare_id, runda, svar, ratt, tid_ms, poang, avstand)
+  values (p_rum, s.id, r.runda, p_svar, ar_ratt, tid_ms, poang, avstand_)
   on conflict (spelare_id, runda) do nothing;
 
   return jsonb_build_object('ok', true);
@@ -874,8 +973,8 @@ begin
       select coalesce(jsonb_agg(jsonb_build_object(
         'spelare_id', p.id, 'namn', p.namn, 'avatar', p.avatar, 'grupp', p.grupp,
         'poang', coalesce(s.poang, 0), 'ratt', s.ratt, 'svar', s.svar,
-        'tid_ms', s.tid_ms, 'svarade', s.id is not null)
-        order by coalesce(s.poang, 0) desc, s.tid_ms nulls last, lower(p.namn)), '[]')
+        'tid_ms', s.tid_ms, 'avstand', s.avstand, 'svarade', s.id is not null)
+        order by coalesce(s.poang, 0) desc, s.avstand nulls last, s.tid_ms nulls last, lower(p.namn)), '[]')
       from kb_spelare p
       left join kb_svar s on s.spelare_id = p.id and s.runda = r.runda
       where p.rum_id = p_rum),
@@ -884,7 +983,7 @@ begin
     'jag', (
       select e.v || jsonb_build_object(
         'runda_poang', coalesce(s.poang, 0), 'ratt', s.ratt, 'svar', s.svar,
-        'tid_ms', s.tid_ms, 'svarade', s.id is not null)
+        'tid_ms', s.tid_ms, 'avstand', s.avstand, 'svarade', s.id is not null)
       from jsonb_array_elements(lista) as e(v)
       join kb_spelare p on p.id = (e.v ->> 'spelare_id')::uuid
       left join kb_svar s on s.spelare_id = p.id and s.runda = r.runda
@@ -913,116 +1012,665 @@ revoke execute on function kb_stada() from public, anon, authenticated;
 select cron.schedule('kb-stadning', '20 3 * * *', $$select kb_stada()$$);
 
 
+-- =====================================================================
+--  INNEHÅLLET
+--  Allt nedan skrivs om varje gång filen körs. Vill du ändra, lägga
+--  till eller ta bort frågor och låtar: gör det här och kör filen igen.
+-- =====================================================================
+
 -- ---------------------------------------------------------------------
---  Frågebanken
---  Första alternativet är det rätta. Lägg gärna till egna frågor här
---  och kör filen igen. Ändrar du en frågas text blir den en ny fråga
---  (den gamla finns kvar tills du tar bort den i Table Editor).
---  niva: 1 = de flesta 5-åringar kan, 2 = lagom för 8–12, 3 = klurig.
+--  Kunskapsfrågorna. DET FÖRSTA ALTERNATIVET ÄR ALLTID DET RÄTTA,
+--  spelet blandar ordningen.
+--  Kategorier: geografi, underhallning, historia, kultur, natur, sport
+--  niva: 1 = lätt, 2 = medel, 3 = svår
 -- ---------------------------------------------------------------------
 
-insert into kb_fragor (fraga, alternativ, emoji, kategori, niva) values
-  -- Djur
-  ('Vilket djur är världens största?', '{Blåval,Elefant,Giraff,Isbjörn}', '🐋', 'djur', 2),
-  ('Hur många ben har en spindel?', '{8,6,10,12}', '🕷️', 'djur', 2),
-  ('Vad kallas en kos unge?', '{Kalv,Föl,Lamm,Killing}', '🐄', 'djur', 1),
-  ('Vilket djur säger "kuckeliku"?', '{Tuppen,Ankan,Grisen,Fåret}', '🐓', 'djur', 1),
-  ('Vilket djur har längst hals?', '{Giraffen,Kamelen,Strutsen,Hästen}', '🦒', 'djur', 1),
-  ('Vad äter pandor nästan bara?', '{Bambu,Fisk,Bananer,Honung}', '🐼', 'djur', 1),
-  ('Vilket av de här djuren är ett däggdjur?', '{Delfin,Haj,Pingvin,Krokodil}', '🐬', 'djur', 3),
-  ('Vilket djur brukar kallas skogens konung i Sverige?', '{Älgen,Björnen,Vargen,Lodjuret}', '🌲', 'djur', 2),
-  ('Hur många hjärtan har en bläckfisk?', '{3,1,2,4}', '🐙', 'djur', 3),
-  ('Vilken fågel kan flyga baklänges?', '{Kolibrin,Örnen,Duvan,Måsen}', '🐦', 'djur', 3),
-  ('Vad kallas en grupp vargar?', '{Flock,Hjord,Svärm,Stim}', '🐺', 'djur', 2),
-  ('Vilket av djuren kan sova stående?', '{Hästen,Hunden,Katten,Kaninen}', '🐴', 'djur', 2),
-  ('Vilket av djuren lägger ägg?', '{Ankan,Kon,Katten,Hunden}', '🥚', 'djur', 1),
-  ('Hur många ben har en insekt?', '{6,4,8,10}', '🐞', 'djur', 2),
-  ('Vilket djur har svarta och vita ränder?', '{Zebran,Elefanten,Flodhästen,Noshörningen}', '🦓', 'djur', 1),
-  ('Vilken färg har isbjörnens hud under pälsen?', '{Svart,Vit,Rosa,Gul}', '🐻‍❄️', 'djur', 3),
-  ('Vilket djur springer snabbast på land?', '{Geparden,Lejonet,Hästen,Strutsen}', '🐆', 'djur', 2),
-  ('Vilket djur bor i en kupa och gör honung?', '{Biet,Myran,Flugan,Musen}', '🐝', 'djur', 1),
-  ('Vilket djur bär sitt hus på ryggen?', '{Snigeln,Grodan,Masken,Ödlan}', '🐌', 'djur', 1),
-  ('Hur många armar har en bläckfisk?', '{8,6,10,12}', '🐙', 'djur', 2),
-  ('Vilken fågel är en symbol för fred?', '{Duvan,Kråkan,Örnen,Ugglan}', '🕊️', 'djur', 2),
-  ('Vad heter hästens unge?', '{Föl,Kalv,Valp,Kattunge}', '🐎', 'djur', 1),
+truncate kb_fragor restart identity;
 
-  -- Natur och rymden
-  ('Vilken planet ligger närmast solen?', '{Merkurius,Venus,Mars,Jorden}', '☀️', 'rymden', 2),
-  ('Vilken planet kallas den röda planeten?', '{Mars,Jupiter,Venus,Saturnus}', '🔴', 'rymden', 2),
-  ('Vilken är den största planeten i vårt solsystem?', '{Jupiter,Saturnus,Jorden,Neptunus}', '🪐', 'rymden', 2),
-  ('Vilken stjärna är närmast jorden?', '{Solen,Polstjärnan,Sirius,Månen}', '⭐', 'rymden', 3),
-  ('Hur många planeter finns i vårt solsystem?', '{8,7,9,10}', '🌍', 'rymden', 2),
-  ('Vilken planet har de tydligaste ringarna?', '{Saturnus,Mars,Merkurius,Venus}', '🪐', 'rymden', 2),
-  ('Vad blir vatten när det fryser?', '{Is,Ånga,Lera,Sand}', '🧊', 'natur', 1),
-  ('Vilken färg blir det om man blandar blått och gult?', '{Grönt,Lila,Orange,Brunt}', '🎨', 'natur', 1),
-  ('Vilken färg blir det om man blandar rött och vitt?', '{Rosa,Lila,Orange,Grått}', '🎨', 'natur', 1),
-  ('Hur många färger brukar man säga att regnbågen har?', '{7,5,6,8}', '🌈', 'natur', 2),
-  ('Vilket är jordens största hav?', '{Stilla havet,Atlanten,Indiska oceanen,Östersjön}', '🌊', 'natur', 3),
-  ('Vad behöver en växt för att växa?', '{Ljus och vatten,Mjölk,Sand och salt,Mörker}', '🌱', 'natur', 1),
-  ('Vilken årstid kommer efter vintern?', '{Våren,Sommaren,Hösten,Vintern igen}', '❄️', 'natur', 1),
-  ('Vilken gas måste vi andas in för att leva?', '{Syre,Koldioxid,Helium,Vätgas}', '🫁', 'natur', 2),
-  ('Vad kallas den glödheta smälta stenen som rinner ur en vulkan?', '{Lava,Grus,Kol,Salt}', '🌋', 'natur', 2),
-  ('Vad kallas det när havet stiger och sjunker två gånger om dygnet?', '{Tidvatten,Tsunami,Monsun,Virvel}', '🌊', 'natur', 3),
+insert into kb_fragor (kategori, niva, emoji, fraga, alternativ) values
+  -- geografi
+  ('geografi', 2, '🦘', 'Vad heter Australiens huvudstad?',
+    array['Canberra', 'Sydney', 'Melbourne', 'Perth']),
+  ('geografi', 2, '👥', 'Vilket land har flest invånare i världen?',
+    array['Indien', 'Kina', 'USA', 'Indonesien']),
+  ('geografi', 2, '🏔️', 'I vilket land ligger inkastaden Machu Picchu?',
+    array['Peru', 'Bolivia', 'Chile', 'Mexiko']),
+  ('geografi', 2, '🍁', 'Vad heter Kanadas huvudstad?',
+    array['Ottawa', 'Toronto', 'Montréal', 'Vancouver']),
+  ('geografi', 3, '🌊', 'Vilken är Europas längsta flod?',
+    array['Volga', 'Donau', 'Rhen', 'Dnepr']),
+  ('geografi', 1, '🥾', 'Vilket land har formen av en stövel?',
+    array['Italien', 'Grekland', 'Spanien', 'Kroatien']),
+  ('geografi', 2, '🏛️', 'Vilken stad brukar kallas den eviga staden?',
+    array['Rom', 'Aten', 'Jerusalem', 'Istanbul']),
+  ('geografi', 2, '⛏️', 'Vilken är Sveriges nordligaste stad?',
+    array['Kiruna', 'Luleå', 'Haparanda', 'Gällivare']),
+  ('geografi', 2, '🧭', 'Vad heter havsviken mellan norra Sverige och Finland?',
+    array['Bottniska viken', 'Finska viken', 'Rigabukten', 'Skagerrak']),
+  ('geografi', 1, '🗽', 'I vilken stad står Frihetsgudinnan?',
+    array['New York', 'Washington', 'Boston', 'Philadelphia']),
+  ('geografi', 3, '💧', 'Vilket land har flest sjöar i världen?',
+    array['Kanada', 'Finland', 'Sverige', 'Ryssland']),
+  ('geografi', 2, '🐪', 'Vilken är världens största varma öken?',
+    array['Sahara', 'Gobi', 'Kalahari', 'Atacama']),
+  ('geografi', 1, '🇪🇸', 'Vad heter Spaniens huvudstad?',
+    array['Madrid', 'Barcelona', 'Sevilla', 'Valencia']),
+  ('geografi', 2, '🦓', 'Vilket land har huvudstaden Nairobi?',
+    array['Kenya', 'Tanzania', 'Uganda', 'Etiopien']),
+  ('geografi', 1, '🎡', 'Vilken flod rinner genom London?',
+    array['Themsen', 'Seine', 'Donau', 'Rhen']),
+  ('geografi', 2, '🥐', 'Vilken flod rinner genom Paris?',
+    array['Seine', 'Loire', 'Rhône', 'Rhen']),
+  ('geografi', 2, '🦌', 'Vilket är Sveriges till ytan största landskap?',
+    array['Lappland', 'Norrbotten', 'Jämtland', 'Småland']),
+  ('geografi', 1, '🌋', 'Vad heter Islands huvudstad?',
+    array['Reykjavik', 'Akureyri', 'Tórshavn', 'Nuuk']),
+  ('geografi', 3, '🏔️', 'Vilket litet land ligger i Pyrenéerna mellan Spanien och Frankrike?',
+    array['Andorra', 'Monaco', 'Liechtenstein', 'San Marino']),
+  ('geografi', 2, '⛪', 'Vilket är världens minsta land?',
+    array['Vatikanstaten', 'Monaco', 'San Marino', 'Liechtenstein']),
+  ('geografi', 2, '🐻', 'Vilken delstat i USA är störst till ytan?',
+    array['Alaska', 'Texas', 'Kalifornien', 'Montana']),
+  ('geografi', 2, '🕌', 'Vad heter Turkiets huvudstad?',
+    array['Ankara', 'Istanbul', 'Izmir', 'Antalya']),
+  ('geografi', 3, '🕰️', 'Vilket land har flest tidszoner om man räknar med alla dess områden?',
+    array['Frankrike', 'Ryssland', 'USA', 'Kina']),
+  ('geografi', 2, '⛰️', 'Vilket är Afrikas högsta berg?',
+    array['Kilimanjaro', 'Mount Kenya', 'Atlasberget Toubkal', 'Ruwenzori']),
+  ('geografi', 2, '⚽', 'Vad heter Brasiliens huvudstad?',
+    array['Brasília', 'Rio de Janeiro', 'São Paulo', 'Salvador']),
+  ('geografi', 3, '🧊', 'Vilken av de här städerna ligger längst norrut?',
+    array['Tromsø', 'Murmansk', 'Kiruna', 'Reykjavik']),
+  ('geografi', 1, '🌉', 'Vad heter sundet mellan Sverige och Danmark vid Helsingborg och Malmö?',
+    array['Öresund', 'Kattegatt', 'Skagerrak', 'Lilla Bält']),
+  ('geografi', 2, '⛪', 'I vilken stad står kyrkan Sagrada Família?',
+    array['Barcelona', 'Madrid', 'Lissabon', 'Rom']),
+  ('geografi', 1, '🇵🇹', 'Vilket land har huvudstaden Lissabon?',
+    array['Portugal', 'Spanien', 'Brasilien', 'Italien']),
+  ('geografi', 1, '🌊', 'Vilket hav ligger mellan Europa och Afrika?',
+    array['Medelhavet', 'Röda havet', 'Svarta havet', 'Kaspiska havet']),
+  ('geografi', 2, '🕌', 'I vilket land ligger staden Marrakech?',
+    array['Marocko', 'Egypten', 'Tunisien', 'Turkiet']),
+  ('geografi', 3, '🍋', 'Vilken är den största ön i Medelhavet?',
+    array['Sicilien', 'Sardinien', 'Cypern', 'Korsika']),
+  ('geografi', 3, '🏔️', 'Vad heter Norges högsta berg?',
+    array['Galdhøpiggen', 'Glittertind', 'Snøhetta', 'Store Skagastølstind']),
+  ('geografi', 2, '🌍', 'Vilket land har flest invånare i Afrika?',
+    array['Nigeria', 'Egypten', 'Etiopien', 'Sydafrika']),
+  ('geografi', 2, '🏰', 'Vad heter Skottlands huvudstad?',
+    array['Edinburgh', 'Glasgow', 'Aberdeen', 'Inverness']),
+  ('geografi', 1, '🪆', 'I vilken stad ligger Kreml?',
+    array['Moskva', 'Sankt Petersburg', 'Kiev', 'Minsk']),
 
-  -- Kroppen
-  ('Hur många tänder har en vuxen när alla visdomständer har kommit?', '{32,20,28,40}', '🦷', 'kroppen', 3),
-  ('Vilket organ pumpar runt blodet i kroppen?', '{Hjärtat,Magen,Lungorna,Hjärnan}', '❤️', 'kroppen', 1),
-  ('Hur många fingrar har man på två händer?', '{10,8,12,5}', '🖐️', 'kroppen', 1),
-  ('Vilket är kroppens största organ?', '{Huden,Levern,Hjärnan,Lungorna}', '🧍', 'kroppen', 3),
-  ('Vad använder vi för att lukta?', '{Näsan,Öronen,Ögonen,Armbågen}', '👃', 'kroppen', 1),
+  -- underhallning
+  ('underhallning', 1, '⚡', 'Vad heter Harry Potters bästa vän, pojken med rött hår?',
+    array['Ron Weasley', 'Neville Longbottom', 'Draco Malfoy', 'Cedric Diggory']),
+  ('underhallning', 1, '🎤', 'Vilken grupp bestod av Agnetha, Björn, Benny och Anni-Frid?',
+    array['ABBA', 'Roxette', 'Ace of Base', 'Alcazar']),
+  ('underhallning', 2, '☕', 'I vilken stad utspelar sig TV-serien Vänner (Friends)?',
+    array['New York', 'Los Angeles', 'Chicago', 'Boston']),
+  ('underhallning', 2, '🦖', 'Vem regisserade filmen Jurassic Park?',
+    array['Steven Spielberg', 'George Lucas', 'James Cameron', 'Ridley Scott']),
+  ('underhallning', 1, '🍩', 'Vad heter pappan i familjen Simpson?',
+    array['Homer', 'Bart', 'Ned', 'Moe']),
+  ('underhallning', 2, '🇸🇪', 'Vilket år vann Loreen Eurovision med Euphoria?',
+    array['2012', '2010', '2014', '2016']),
+  ('underhallning', 1, '🧱', 'Vad heter datorspelet där man vänder och staplar fallande block?',
+    array['Tetris', 'Minecraft', 'Pac-Man', 'Candy Crush']),
+  ('underhallning', 2, '🎶', 'Vem sjöng Främling i Melodifestivalen 1983?',
+    array['Carola', 'Lena Philipsson', 'Kikki Danielsson', 'Anna Book']),
+  ('underhallning', 1, '🚢', 'Vem spelade Jack i filmen Titanic?',
+    array['Leonardo DiCaprio', 'Brad Pitt', 'Johnny Depp', 'Matt Damon']),
+  ('underhallning', 1, '👑', 'Vilket band sjöng Bohemian Rhapsody?',
+    array['Queen', 'The Beatles', 'The Rolling Stones', 'Led Zeppelin']),
+  ('underhallning', 2, '🤖', 'I vilken film säger Arnold Schwarzenegger "I''ll be back" för första gången?',
+    array['Terminator', 'Predator', 'Total Recall', 'Rambo']),
+  ('underhallning', 3, '🗡️', 'Vad heter hjälten i spelserien The Legend of Zelda?',
+    array['Link', 'Zelda', 'Ganon', 'Navi']),
+  ('underhallning', 2, '♟️', 'Vilken svensk regissör gjorde filmen Det sjunde inseglet?',
+    array['Ingmar Bergman', 'Lasse Hallström', 'Bo Widerberg', 'Roy Andersson']),
+  ('underhallning', 1, '🕺', 'Vilken artist kallas The King of Pop?',
+    array['Michael Jackson', 'Elvis Presley', 'Prince', 'Justin Timberlake']),
+  ('underhallning', 1, '🏰', 'Vad heter trollkarlsskolan i Harry Potter?',
+    array['Hogwarts', 'Narnia', 'Durmstrang', 'Avalon']),
+  ('underhallning', 3, '🎼', 'Vem skrev musiken till de första Star Wars-filmerna?',
+    array['John Williams', 'Hans Zimmer', 'Ennio Morricone', 'Howard Shore']),
+  ('underhallning', 1, '🌹', 'Vilken svensk duo sjöng It Must Have Been Love?',
+    array['Roxette', 'Gyllene Tider', 'The Cardigans', 'Icona Pop']),
+  ('underhallning', 2, '🧅', 'Vad heter Shreks fru?',
+    array['Fiona', 'Aurora', 'Belle', 'Ariel']),
+  ('underhallning', 2, '☕', 'Vad heter kaféet där vännerna i Friends brukar sitta?',
+    array['Central Perk', 'Monk''s Café', 'The Max', 'Luke''s Diner']),
+  ('underhallning', 1, '🕷️', 'Vilken superhjälte heter egentligen Peter Parker?',
+    array['Spider-Man', 'Batman', 'Iron Man', 'Superman']),
+  ('underhallning', 1, '🍄', 'Vad heter Nintendos rörmokare med röd keps?',
+    array['Mario', 'Luigi', 'Wario', 'Toad']),
+  ('underhallning', 1, '💍', 'Vilken filmserie handlar om en ring som måste förstöras i Mordor?',
+    array['Sagan om ringen', 'Narnia', 'Harry Potter', 'Game of Thrones']),
+  ('underhallning', 2, '💿', 'Vilken artist släppte albumet 1989?',
+    array['Taylor Swift', 'Madonna', 'Adele', 'Katy Perry']),
+  ('underhallning', 1, '🎧', 'Vilken svensk DJ och producent gjorde Wake Me Up?',
+    array['Avicii', 'Alesso', 'Axwell', 'Basshunter']),
+  ('underhallning', 1, '🐠', 'Vilken film handlar om en clownfisk som letar efter sin son?',
+    array['Hitta Nemo', 'Den lilla sjöjungfrun', 'Vaiana', 'Hajar som hajar']),
+  ('underhallning', 2, '💜', 'Vem sjöng Purple Rain?',
+    array['Prince', 'Michael Jackson', 'Stevie Wonder', 'Lionel Richie']),
+  ('underhallning', 2, '🐒', 'Vem spelade Pippi Långstrump i TV-serien från 1969?',
+    array['Inger Nilsson', 'Grete Havnesköld', 'Tami Erin', 'Lena Endre']),
+  ('underhallning', 2, '🏆', 'Vem vann Eurovision 2015 för Sverige med Heroes?',
+    array['Måns Zelmerlöw', 'Danny Saucedo', 'Eric Saade', 'Benjamin Ingrosso']),
+  ('underhallning', 2, '🎷', 'Vilket år vann ABBA Eurovision med Waterloo?',
+    array['1974', '1972', '1976', '1978']),
+  ('underhallning', 2, '🧨', 'Vem spelade Sickan i filmerna om Jönssonligan?',
+    array['Gösta Ekman', 'Ulf Brunnberg', 'Björn Gustafson', 'Allan Svensson']),
+  ('underhallning', 1, '⚡', 'Vad heter den mest kända gula Pokémonen?',
+    array['Pikachu', 'Bulbasaur', 'Charmander', 'Jigglypuff']),
+  ('underhallning', 1, '🍸', 'Vilken hemlig agent har nummer 007?',
+    array['James Bond', 'Jason Bourne', 'Ethan Hunt', 'Jack Ryan']),
+  ('underhallning', 1, '🇬🇷', 'Vilken musikal med ABBA-låtar utspelar sig på en grekisk ö?',
+    array['Mamma Mia!', 'Chess', 'Grease', 'Kristina från Duvemåla']),
+  ('underhallning', 2, '🪩', 'Vilken svensk artist ligger bakom låten Dancing On My Own?',
+    array['Robyn', 'Zara Larsson', 'Tove Lo', 'Veronica Maggio']),
+  ('underhallning', 3, '🎬', 'Vilken av de här filmerna vann elva Oscarsstatyetter?',
+    array['Titanic', 'Gudfadern', 'Forrest Gump', 'Avatar']),
 
-  -- Sverige
-  ('Vad heter Sveriges huvudstad?', '{Stockholm,Göteborg,Malmö,Uppsala}', '🇸🇪', 'Sverige', 1),
-  ('Vilka färger har Sveriges flagga?', '{Blått och gult,Rött och vitt,Blått och vitt,Grönt och gult}', '🇸🇪', 'Sverige', 1),
-  ('Vad heter Sveriges största sjö?', '{Vänern,Vättern,Mälaren,Siljan}', '🏞️', 'Sverige', 2),
-  ('Vilken månad firar vi midsommar?', '{Juni,Maj,Juli,Augusti}', '🌸', 'Sverige', 1),
-  ('Vad heter Sveriges högsta berg?', '{Kebnekaise,Åreskutan,Sylarna,Helags}', '⛰️', 'Sverige', 2),
-  ('Vilket datum är Sveriges nationaldag?', '{6 juni,17 maj,24 juni,1 maj}', '🎉', 'Sverige', 3),
-  ('I vilket landskap föddes Astrid Lindgren?', '{Småland,Skåne,Lappland,Dalarna}', '📚', 'Sverige', 3),
-  ('Vad heter Pippi Långstrumps häst?', '{Lilla Gubben,Herr Nilsson,Blixten,Snövit}', '🐴', 'Sverige', 2),
-  ('I vilken stad ligger nöjesparken Liseberg?', '{Göteborg,Stockholm,Malmö,Uppsala}', '🎢', 'Sverige', 2),
-  ('Vilken är Sveriges största ö?', '{Gotland,Öland,Orust,Tjörn}', '🏝️', 'Sverige', 2),
-  ('Vilket djur är Dalarnas mest kända träfigur?', '{En häst,En ko,En tupp,En gris}', '🐎', 'Sverige', 1),
-  ('Vilken bulle äter man på fettisdagen?', '{Semla,Kanelbulle,Lussekatt,Munk}', '🥯', 'Sverige', 2),
+  -- historia
+  ('historia', 1, '🇺🇸', 'Vem var USA:s första president?',
+    array['George Washington', 'Abraham Lincoln', 'Thomas Jefferson', 'Benjamin Franklin']),
+  ('historia', 2, '🪖', 'Vilket år började första världskriget?',
+    array['1914', '1912', '1916', '1918']),
+  ('historia', 2, '⚔️', 'Vilken svensk kung dog i slaget vid Lützen 1632?',
+    array['Gustav II Adolf', 'Karl XII', 'Gustav Vasa', 'Karl XI']),
+  ('historia', 2, '🧱', 'Vilket land byggde Berlinmuren?',
+    array['Östtyskland', 'Sovjetunionen', 'Västtyskland', 'Polen']),
+  ('historia', 1, '🌕', 'Vem var den första människan som gick på månen?',
+    array['Neil Armstrong', 'Buzz Aldrin', 'Jurij Gagarin', 'Michael Collins']),
+  ('historia', 1, '⛵', 'Vilket regalskepp sjönk i Stockholm på sin första resa 1628?',
+    array['Vasa', 'Kronan', 'Svärdet', 'Mars']),
+  ('historia', 1, '🏺', 'I vilket land styrde faraonerna?',
+    array['Egypten', 'Grekland', 'Persien', 'Mesopotamien']),
+  ('historia', 2, '🎩', 'Vem var Storbritanniens premiärminister under större delen av andra världskriget?',
+    array['Winston Churchill', 'Neville Chamberlain', 'Clement Attlee', 'Margaret Thatcher']),
+  ('historia', 2, '👑', 'Vilket år valdes Gustav Vasa till kung av Sverige?',
+    array['1523', '1397', '1611', '1809']),
+  ('historia', 2, '🤝', 'Vad kallades unionen mellan Sverige, Norge och Danmark som bildades 1397?',
+    array['Kalmarunionen', 'Hansan', 'Nordiska rådet', 'Skandinaviska unionen']),
+  ('historia', 3, '🏝️', 'På vilken ö dog Napoleon?',
+    array['Sankta Helena', 'Elba', 'Korsika', 'Malta']),
+  ('historia', 2, '🦙', 'Vilket folk byggde Machu Picchu?',
+    array['Inkafolket', 'Mayafolket', 'Aztekerna', 'Olmekerna']),
+  ('historia', 2, '🌋', 'Vilken stad begravdes av vulkanen Vesuvius år 79?',
+    array['Pompeji', 'Neapel', 'Rom', 'Aten']),
+  ('historia', 2, '🇳🇴', 'Vilket år upplöstes unionen mellan Sverige och Norge?',
+    array['1905', '1814', '1918', '1945']),
+  ('historia', 2, '🛰️', 'Vilket land skickade upp den första satelliten, Sputnik?',
+    array['Sovjetunionen', 'USA', 'Kina', 'Storbritannien']),
+  ('historia', 3, '🩸', 'Vilket år ägde Stockholms blodbad rum?',
+    array['1520', '1397', '1611', '1718']),
+  ('historia', 3, '👸', 'Vilken svensk drottning abdikerade 1654 och flyttade till Rom?',
+    array['Kristina', 'Ulrika Eleonora', 'Lovisa Ulrika', 'Margareta']),
+  ('historia', 1, '✊', 'Vem blev Sydafrikas första svarta president?',
+    array['Nelson Mandela', 'Desmond Tutu', 'Jacob Zuma', 'Thabo Mbeki']),
+  ('historia', 3, '🗳️', 'Vilket år fick kvinnor rösta för första gången i ett riksdagsval i Sverige?',
+    array['1921', '1909', '1945', '1866']),
+  ('historia', 1, '🔨', 'Vem var åskguden i den nordiska mytologin?',
+    array['Tor', 'Oden', 'Loke', 'Frej']),
+  ('historia', 2, '⛵', 'Vad hette det största av Columbus fartyg på resan 1492?',
+    array['Santa María', 'Pinta', 'Niña', 'Victoria']),
+  ('historia', 1, '🏟️', 'Vilket rike byggde Colosseum?',
+    array['Romarriket', 'Grekland', 'Egypten', 'Persien']),
+  ('historia', 2, '🇫🇷', 'Vilket år började franska revolutionen?',
+    array['1789', '1689', '1815', '1848']),
+  ('historia', 1, '🧨', 'Vem uppfann dynamiten?',
+    array['Alfred Nobel', 'Thomas Edison', 'Anders Celsius', 'Nikola Tesla']),
+  ('historia', 2, '🇫🇮', 'Till vilket land förlorade Sverige Finland 1809?',
+    array['Ryssland', 'Danmark', 'Preussen', 'Polen']),
+  ('historia', 3, '🐉', 'Under vilken kinesisk dynasti byggdes det mesta av den mur man ser i dag?',
+    array['Mingdynastin', 'Qindynastin', 'Handynastin', 'Tangdynastin']),
+  ('historia', 2, '🛡️', 'Vilket år blev Sverige medlem i Nato?',
+    array['2024', '2022', '2023', '1995']),
+  ('historia', 1, '🇩🇪', 'Vem var Tysklands förbundskansler 2005–2021?',
+    array['Angela Merkel', 'Gerhard Schröder', 'Olaf Scholz', 'Helmut Kohl']),
+  ('historia', 1, '🕊️', 'Vilket år tog andra världskriget slut?',
+    array['1945', '1944', '1946', '1939']),
+  ('historia', 2, '📜', 'Vilken svensk diplomat räddade tusentals judar i Budapest 1944?',
+    array['Raoul Wallenberg', 'Dag Hammarskjöld', 'Folke Bernadotte', 'Hans Blix']),
+  ('historia', 3, '🔺', 'Vilken farao lät bygga den största pyramiden i Giza?',
+    array['Cheops', 'Tutankhamon', 'Ramses II', 'Kleopatra']),
+  ('historia', 1, '🏛️', 'Vem blev Sveriges första kvinnliga statsminister?',
+    array['Magdalena Andersson', 'Mona Sahlin', 'Annie Lööf', 'Ebba Busch']),
+  ('historia', 2, '🔥', 'Vilken fransk hjältinna brändes på bål 1431?',
+    array['Jeanne d''Arc', 'Marie Antoinette', 'Katarina av Medici', 'Marie Curie']),
 
-  -- Mat
-  ('Vad görs pommes frites av?', '{Potatis,Morötter,Äpplen,Ris}', '🍟', 'mat', 1),
-  ('Vilken frukt är gul och böjd?', '{Banan,Äpple,Päron,Kiwi}', '🍌', 'mat', 1),
-  ('Vad görs guacamole av?', '{Avokado,Gurka,Ärtor,Kiwi}', '🥑', 'mat', 2),
-  ('Från vilket land kommer pizzan?', '{Italien,USA,Frankrike,Grekland}', '🍕', 'mat', 2),
-  ('Vad blir grädde om man vispar den alldeles för länge?', '{Smör,Ost,Yoghurt,Glass}', '🧈', 'mat', 3),
-  ('Vilken orange grönsak växer nere i jorden?', '{Morot,Gurka,Tomat,Paprika}', '🥕', 'mat', 1),
-  ('Vilken färg har en mogen tomat?', '{Röd,Blå,Lila,Svart}', '🍅', 'mat', 1),
+  -- kultur
+  ('kultur', 1, '🐴', 'Vem skrev böckerna om Pippi Långstrump?',
+    array['Astrid Lindgren', 'Selma Lagerlöf', 'Elsa Beskow', 'Tove Jansson']),
+  ('kultur', 2, '🌌', 'Vem målade Stjärnenatten?',
+    array['Vincent van Gogh', 'Claude Monet', 'Pablo Picasso', 'Edvard Munch']),
+  ('kultur', 1, '🎭', 'Vem skrev Romeo och Julia?',
+    array['William Shakespeare', 'Charles Dickens', 'Molière', 'Goethe']),
+  ('kultur', 2, '🎨', 'Vem målade taket i Sixtinska kapellet?',
+    array['Michelangelo', 'Leonardo da Vinci', 'Rafael', 'Donatello']),
+  ('kultur', 2, '🖼️', 'På vilket museum hänger Mona Lisa?',
+    array['Louvren', 'Prado', 'Uffizierna', 'British Museum']),
+  ('kultur', 2, '🪿', 'Vem skrev Nils Holgerssons underbara resa genom Sverige?',
+    array['Selma Lagerlöf', 'Astrid Lindgren', 'Elsa Beskow', 'Viktor Rydberg']),
+  ('kultur', 2, '🚢', 'Vem skrev romanserien Utvandrarna?',
+    array['Vilhelm Moberg', 'Ivar Lo-Johansson', 'Harry Martinson', 'Hjalmar Söderberg']),
+  ('kultur', 1, '🍣', 'Från vilket land kommer sushi?',
+    array['Japan', 'Kina', 'Thailand', 'Korea']),
+  ('kultur', 2, '🐉', 'Vem skrev Millennium-trilogin om Lisbeth Salander?',
+    array['Stieg Larsson', 'Henning Mankell', 'Camilla Läckberg', 'Jan Guillou']),
+  ('kultur', 2, '😱', 'Vem målade Skriet?',
+    array['Edvard Munch', 'Vincent van Gogh', 'Salvador Dalí', 'Gustav Klimt']),
+  ('kultur', 2, '🎻', 'Vem komponerade De fyra årstiderna?',
+    array['Antonio Vivaldi', 'Wolfgang Amadeus Mozart', 'Johann Sebastian Bach', 'Joseph Haydn']),
+  ('kultur', 2, '📕', 'Vem skrev Röda rummet?',
+    array['August Strindberg', 'Hjalmar Söderberg', 'Selma Lagerlöf', 'Verner von Heidenstam']),
+  ('kultur', 1, '🇧🇷', 'Vilket språk talar man i Brasilien?',
+    array['Portugisiska', 'Spanska', 'Brasilianska', 'Italienska']),
+  ('kultur', 1, '🪄', 'Vem skrev böckerna om Harry Potter?',
+    array['J.K. Rowling', 'Roald Dahl', 'C.S. Lewis', 'Rick Riordan']),
+  ('kultur', 2, '🏡', 'Vilken svensk konstnär målade sitt hem i Sundborn?',
+    array['Carl Larsson', 'Anders Zorn', 'Bruno Liljefors', 'John Bauer']),
+  ('kultur', 1, '🌊', 'Vem skapade Mumintrollen?',
+    array['Tove Jansson', 'Astrid Lindgren', 'Elsa Beskow', 'Gunilla Bergström']),
+  ('kultur', 2, '🎹', 'Vilken kompositör fortsatte komponera trots att han blev döv?',
+    array['Ludwig van Beethoven', 'Wolfgang Amadeus Mozart', 'Frédéric Chopin', 'Franz Schubert']),
+  ('kultur', 3, '⛪', 'I vilken byggnadsstil är katedralen Notre-Dame i Paris byggd?',
+    array['Gotik', 'Barock', 'Romansk stil', 'Jugend']),
+  ('kultur', 1, '🥘', 'Från vilket land kommer rätten paella?',
+    array['Spanien', 'Italien', 'Mexiko', 'Portugal']),
+  ('kultur', 1, '🧙', 'Vem skrev Sagan om ringen?',
+    array['J.R.R. Tolkien', 'C.S. Lewis', 'George R.R. Martin', 'J.K. Rowling']),
+  ('kultur', 3, '🎼', 'Vilket instrument har 47 strängar och sju pedaler?',
+    array['Harpa', 'Cembalo', 'Flygel', 'Luta']),
+  ('kultur', 1, '🦁', 'I vilken bok bor bröderna Jonatan och Skorpan i Körsbärsdalen?',
+    array['Bröderna Lejonhjärta', 'Mio, min Mio', 'Ronja rövardotter', 'Emil i Lönneberga']),
+  ('kultur', 2, '🕵️', 'Vad heter Agatha Christies belgiske detektiv?',
+    array['Hercule Poirot', 'Sherlock Holmes', 'Kommissarie Maigret', 'Philip Marlowe']),
+  ('kultur', 3, '🛡️', 'Vem skrev Don Quijote?',
+    array['Miguel de Cervantes', 'Dante Alighieri', 'Victor Hugo', 'Gabriel García Márquez']),
+  ('kultur', 3, '🎶', 'Vilket land kom kompositören Jean Sibelius från?',
+    array['Finland', 'Norge', 'Danmark', 'Estland']),
+  ('kultur', 1, '🦢', 'Vad kallas den japanska konsten att vika figurer av papper?',
+    array['Origami', 'Ikebana', 'Kalligrafi', 'Bonsai']),
+  ('kultur', 2, '🐂', 'Vem målade Guernica?',
+    array['Pablo Picasso', 'Salvador Dalí', 'Joan Miró', 'Francisco Goya']),
+  ('kultur', 3, '🏅', 'Vilket år delades Nobelpriset ut för första gången?',
+    array['1901', '1896', '1910', '1921']),
+  ('kultur', 3, '🎨', 'Vem målade den stora oljemålningen Midvinterblot?',
+    array['Carl Larsson', 'Anders Zorn', 'Ernst Josephson', 'Prins Eugen']),
+  ('kultur', 2, '🍻', 'Vem skrev Fredmans epistlar?',
+    array['Carl Michael Bellman', 'Evert Taube', 'Cornelis Vreeswijk', 'Esaias Tegnér']),
+  ('kultur', 1, '💃', 'Från vilket land kommer flamencon?',
+    array['Spanien', 'Argentina', 'Mexiko', 'Brasilien']),
+  ('kultur', 2, '🌸', 'Vad kallas en japansk dikt på tre rader med fem, sju och fem stavelser?',
+    array['Haiku', 'Sonett', 'Limerick', 'Tanka']),
 
-  -- Världen
-  ('Vilket är världens till ytan största land?', '{Ryssland,Kanada,Kina,USA}', '🌏', 'världen', 2),
-  ('I vilket land ligger pyramiderna i Giza?', '{Egypten,Mexiko,Grekland,Indien}', '🏜️', 'världen', 2),
-  ('Var i världen lever kängurur vilt?', '{Australien,Afrika,Sydamerika,Asien}', '🦘', 'världen', 1),
-  ('Vad heter Norges huvudstad?', '{Oslo,Bergen,Köpenhamn,Helsingfors}', '🇳🇴', 'världen', 2),
-  ('Vilket land har ett rött lönnlöv i flaggan?', '{Kanada,Norge,Japan,Schweiz}', '🍁', 'världen', 2),
-  ('Vilket är världens högsta berg?', '{Mount Everest,Kilimanjaro,Mont Blanc,Kebnekaise}', '🏔️', 'världen', 2),
-  ('Vem målade Mona Lisa?', '{Leonardo da Vinci,Pablo Picasso,Vincent van Gogh,Carl Larsson}', '🖼️', 'världen', 3),
+  -- natur
+  ('natur', 2, '🥇', 'Vilken kemisk beteckning har guld?',
+    array['Au', 'Ag', 'Gd', 'Go']),
+  ('natur', 1, '☀️', 'Vilken planet ligger närmast solen?',
+    array['Merkurius', 'Venus', 'Mars', 'Jorden']),
+  ('natur', 2, '🧍', 'Vilket är människokroppens största organ?',
+    array['Huden', 'Levern', 'Hjärnan', 'Lungorna']),
+  ('natur', 3, '📻', 'Vad mäts i enheten hertz?',
+    array['Frekvens', 'Effekt', 'Spänning', 'Tryck']),
+  ('natur', 2, '💎', 'Vilket är det hårdaste naturliga materialet?',
+    array['Diamant', 'Granit', 'Stål', 'Kvarts']),
+  ('natur', 2, '🌿', 'Vilken gas tar växterna upp ur luften när de fotosyntetiserar?',
+    array['Koldioxid', 'Syre', 'Kväve', 'Helium']),
+  ('natur', 3, '🧬', 'Hur många kromosomer har en människa normalt?',
+    array['46', '23', '48', '44']),
+  ('natur', 3, '🩸', 'Vilken blodgrupp kallas universell givare?',
+    array['0 negativ', 'AB positiv', 'A negativ', 'B positiv']),
+  ('natur', 3, '🦅', 'Vilket djur är snabbast i världen när det dyker?',
+    array['Pilgrimsfalken', 'Kungsörnen', 'Geparden', 'Svärdfisken']),
+  ('natur', 1, '🫁', 'Vilket grundämne har den kemiska beteckningen O?',
+    array['Syre', 'Guld', 'Osmium', 'Kväve']),
+  ('natur', 1, '💡', 'Vem formulerade relativitetsteorin?',
+    array['Albert Einstein', 'Isaac Newton', 'Stephen Hawking', 'Niels Bohr']),
+  ('natur', 3, '🌞', 'Ungefär hur lång tid tar det för solljuset att nå jorden?',
+    array['8 minuter', '8 sekunder', '8 timmar', '8 dagar']),
+  ('natur', 3, '🪐', 'Vilken planet har flest kända månar?',
+    array['Saturnus', 'Jupiter', 'Uranus', 'Neptunus']),
+  ('natur', 3, '💉', 'Vilket organ tillverkar insulin?',
+    array['Bukspottkörteln', 'Levern', 'Njurarna', 'Mjälten']),
+  ('natur', 2, '✨', 'I vilken stjärnbild ingår Karlavagnen?',
+    array['Stora björnen', 'Orion', 'Lilla björnen', 'Kassiopeja']),
+  ('natur', 1, '♨️', 'Vid hur många grader kokar vatten vid havsytan?',
+    array['100 °C', '90 °C', '110 °C', '120 °C']),
+  ('natur', 2, '🐻', 'Vilket är Sveriges största rovdjur?',
+    array['Brunbjörnen', 'Vargen', 'Lodjuret', 'Järven']),
+  ('natur', 1, '🐘', 'Vilket är världens största landdjur?',
+    array['Afrikansk elefant', 'Flodhäst', 'Noshörning', 'Giraff']),
+  ('natur', 2, '⚛️', 'Vilket är det vanligaste grundämnet i universum?',
+    array['Väte', 'Syre', 'Kol', 'Helium']),
+  ('natur', 2, '❤️', 'Hur många kammare har människans hjärta?',
+    array['4', '2', '3', '6']),
+  ('natur', 2, '🌞', 'Vilket vitamin bildar huden när den får sol?',
+    array['D-vitamin', 'C-vitamin', 'A-vitamin', 'B12']),
+  ('natur', 2, '🧫', 'Vem upptäckte penicillinet?',
+    array['Alexander Fleming', 'Louis Pasteur', 'Marie Curie', 'Robert Koch']),
+  ('natur', 1, '🦇', 'Vilket däggdjur kan flyga på riktigt?',
+    array['Fladdermusen', 'Flygekorren', 'Flygfisken', 'Lemuren']),
+  ('natur', 1, '🐋', 'Vilken sorts djur är en val?',
+    array['Däggdjur', 'Fisk', 'Kräldjur', 'Groddjur']),
+  ('natur', 1, '💧', 'Vad är H₂O?',
+    array['Vatten', 'Salt', 'Socker', 'Syrgas']),
+  ('natur', 2, '🔴', 'Vilken planet är känd för sin stora röda fläck?',
+    array['Jupiter', 'Mars', 'Saturnus', 'Venus']),
+  ('natur', 2, '🌡️', 'Vilken metall är flytande vid rumstemperatur?',
+    array['Kvicksilver', 'Aluminium', 'Bly', 'Tenn']),
+  ('natur', 1, '🌱', 'Vad kallas processen där växter gör energi av solljus?',
+    array['Fotosyntes', 'Förbränning', 'Avdunstning', 'Jäsning']),
+  ('natur', 1, '🐧', 'Vilket av de här djuren är inte ett däggdjur?',
+    array['Pingvin', 'Delfin', 'Fladdermus', 'Val']),
+  ('natur', 1, '🪐', 'Vilken är solsystemets största planet?',
+    array['Jupiter', 'Saturnus', 'Neptunus', 'Jorden']),
 
-  -- Sport och lek
-  ('Hur många spelare har ett fotbollslag på planen samtidigt?', '{11,9,10,12}', '⚽', 'sport', 2),
-  ('Hur många ringar finns i OS-symbolen?', '{5,4,6,7}', '🏅', 'sport', 2),
-  ('I vilken sport slår man en fjäderboll över ett nät?', '{Badminton,Tennis,Pingis,Golf}', '🏸', 'sport', 2),
+  -- sport
+  ('sport', 1, '⚽', 'Hur många spelare har ett fotbollslag på planen samtidigt?',
+    array['11', '10', '9', '12']),
+  ('sport', 1, '🗼', 'I vilken stad hölls sommar-OS 2024?',
+    array['Paris', 'London', 'Los Angeles', 'Tokyo']),
+  ('sport', 1, '🎾', 'Vilken svensk tennisspelare vann Wimbledon fem år i rad?',
+    array['Björn Borg', 'Stefan Edberg', 'Mats Wilander', 'Robin Söderling']),
+  ('sport', 2, '🏆', 'Vilket land har vunnit flest VM-guld i fotboll för herrar?',
+    array['Brasilien', 'Tyskland', 'Italien', 'Argentina']),
+  ('sport', 2, '🏃', 'Hur långt är ett maratonlopp?',
+    array['42,195 km', '40 km', '42 km', '45,5 km']),
+  ('sport', 1, '🏒', 'Vilken sport spelade Peter Forsberg och Mats Sundin?',
+    array['Ishockey', 'Fotboll', 'Bandy', 'Innebandy']),
+  ('sport', 2, '🏟️', 'Vilket år hölls sommar-OS i Stockholm?',
+    array['1912', '1924', '1936', '1956']),
+  ('sport', 1, '⛷️', 'Vad heter skidloppet mellan Sälen och Mora?',
+    array['Vasaloppet', 'Engelbrektsloppet', 'Birkebeinerrennet', 'Tjejvasan']),
+  ('sport', 2, '🎿', 'Hur lång är Vasaloppets klassiska bana?',
+    array['90 km', '50 km', '70 km', '100 km']),
+  ('sport', 2, '⛳', 'Vilken svensk golfspelare vann 72 tävlingar på den amerikanska LPGA-touren?',
+    array['Annika Sörenstam', 'Liselotte Neumann', 'Sophie Gustafson', 'Anna Nordqvist']),
+  ('sport', 1, '🏸', 'I vilken sport slår man en fjäderboll över ett nät?',
+    array['Badminton', 'Tennis', 'Squash', 'Pingis']),
+  ('sport', 1, '⭕', 'Hur många ringar finns i den olympiska symbolen?',
+    array['5', '4', '6', '7']),
+  ('sport', 2, '🦁', 'Vem har gjort flest mål för Sveriges herrlandslag i fotboll?',
+    array['Zlatan Ibrahimović', 'Henrik Larsson', 'Sven Rydell', 'Gunnar Nordahl']),
+  ('sport', 1, '🇦🇷', 'Vilket land vann fotbolls-VM 2022?',
+    array['Argentina', 'Frankrike', 'Brasilien', 'Kroatien']),
+  ('sport', 1, '🥇', 'Vilken gren tävlar Armand "Mondo" Duplantis i?',
+    array['Stavhopp', 'Höjdhopp', 'Längdhopp', 'Häck']),
+  ('sport', 3, '🏈', 'Hur många poäng ger en touchdown i amerikansk fotboll?',
+    array['6', '3', '7', '5']),
+  ('sport', 1, '🎳', 'I vilken sport kan man slå en strike genom att fälla alla käglor?',
+    array['Bowling', 'Curling', 'Krocket', 'Boule']),
+  ('sport', 1, '⛳', 'Hur många hål har en vanlig golfbana?',
+    array['18', '9', '12', '24']),
+  ('sport', 2, '❄️', 'Vilken stad stod värd för vinter-OS 1994?',
+    array['Lillehammer', 'Albertville', 'Nagano', 'Calgary']),
+  ('sport', 1, '⏱️', 'Hur många minuter pågår en ordinarie fotbollsmatch?',
+    array['90', '80', '60', '100']),
+  ('sport', 1, '🥋', 'Från vilket land kommer kampsporten judo?',
+    array['Japan', 'Kina', 'Korea', 'Thailand']),
+  ('sport', 1, '🏒', 'Hur många perioder har en ishockeymatch?',
+    array['3', '2', '4', '5']),
+  ('sport', 2, '♟️', 'Vad heter schackdraget där kungen och tornet flyttas samtidigt?',
+    array['Rockad', 'En passant', 'Schack matt', 'Gambit']),
+  ('sport', 2, '🏊', 'Hur lång är en bassäng i OS-simning?',
+    array['50 meter', '25 meter', '100 meter', '33 meter']),
+  ('sport', 3, '🏒', 'Vilket lag har vunnit flest Stanley Cup i NHL?',
+    array['Montreal Canadiens', 'Toronto Maple Leafs', 'Detroit Red Wings', 'Boston Bruins']),
+  ('sport', 2, '🇳🇴', 'Vilket land har vunnit flest guld i vinter-OS genom tiderna?',
+    array['Norge', 'USA', 'Tyskland', 'Sverige']),
+  ('sport', 2, '🚴', 'Vilken cyklist vann Tour de France sju gånger men blev av med titlarna?',
+    array['Lance Armstrong', 'Chris Froome', 'Miguel Indurain', 'Eddy Merckx']),
+  ('sport', 1, '🍓', 'Vilken sport spelas i Wimbledon?',
+    array['Tennis', 'Golf', 'Cricket', 'Polo']),
+  ('sport', 1, '🎯', 'Vilka två grenar kombineras i skidskytte?',
+    array['Längdskidor och skytte', 'Slalom och skytte', 'Backhoppning och skytte', 'Skridsko och skytte']),
+  ('sport', 1, '🏀', 'Hur många spelare har ett basketlag på planen samtidigt?',
+    array['5', '6', '7', '4']),
+  ('sport', 2, '🎾', 'Vilken svensk man har vunnit flest Grand Slam-titlar i singel i tennis?',
+    array['Björn Borg', 'Mats Wilander', 'Stefan Edberg', 'Thomas Johansson']),
+  ('sport', 1, '⛷️', 'Vilken sport utövade Ingemar Stenmark?',
+    array['Alpin skidåkning', 'Längdskidåkning', 'Backhoppning', 'Skidskytte']);
 
-  -- Siffror, ord och blandat
-  ('Hur många hörn har en triangel?', '{3,2,4,5}', '🔺', 'blandat', 1),
-  ('Hur många hörn har en kub?', '{8,6,10,12}', '🎲', 'blandat', 3),
-  ('Vad är motsatsen till varm?', '{Kall,Het,Stor,Snabb}', '🔥', 'blandat', 1),
-  ('Vilken bokstav kommer efter A i alfabetet?', '{B,C,D,Ö}', '🔤', 'blandat', 1),
-  ('Hur många bokstäver har det svenska alfabetet?', '{29,26,28,30}', '🔤', 'blandat', 3),
-  ('Hur många prickar finns det sammanlagt på en vanlig tärning?', '{21,18,24,36}', '🎲', 'blandat', 3),
-  ('Vilket instrument har svarta och vita tangenter?', '{Piano,Gitarr,Trumma,Flöjt}', '🎹', 'blandat', 1),
-  ('Hur många år är ett sekel?', '{100,10,50,1000}', '💯', 'blandat', 2),
-  ('Vilken månad har minst antal dagar?', '{Februari,April,Juni,November}', '📅', 'blandat', 2),
-  ('Hur många minuter är en timme?', '{60,30,100,120}', '⏰', 'blandat', 1),
-  ('Hur många dagar har ett skottår?', '{366,364,365,367}', '📅', 'blandat', 3),
-  ('Vad kallas barnet till din mammas syster?', '{Kusin,Syskon,Brorsbarn,Faster}', '👪', 'blandat', 2)
-on conflict (fraga) do update set
-  alternativ = excluded.alternativ,
-  emoji = excluded.emoji,
-  kategori = excluded.kategori,
-  niva = excluded.niva;
+
+-- ---------------------------------------------------------------------
+--  Låtarna. ar är året låten FÖRST kom ut (inte året för en samlingsskiva).
+--  sok används när "artist titel" inte hittar rätt låt hos iTunes.
+-- ---------------------------------------------------------------------
+
+truncate kb_latar restart identity;
+
+insert into kb_latar (ar, artist, titel, sok) values
+  (1954, 'Bill Haley & His Comets', 'Rock Around the Clock', null),
+  (1955, 'Little Richard', 'Tutti Frutti', null),
+  (1956, 'Elvis Presley', 'Heartbreak Hotel', null),
+  (1957, 'Elvis Presley', 'Jailhouse Rock', null),
+  (1957, 'Buddy Holly', 'Peggy Sue', null),
+  (1958, 'Chuck Berry', 'Johnny B. Goode', null),
+  (1959, 'Lill-Babs', 'Är du kär i mig ännu Klas-Göran?', 'Lill-Babs Klas-Göran'),
+  (1961, 'Ben E. King', 'Stand by Me', null),
+  (1961, 'Ray Charles', 'Hit the Road Jack', null),
+  (1963, 'The Beatles', 'She Loves You', null),
+  (1964, 'The Animals', 'The House of the Rising Sun', null),
+  (1964, 'The Kinks', 'You Really Got Me', null),
+  (1965, 'The Beatles', 'Yesterday', null),
+  (1965, 'The Rolling Stones', '(I Can''t Get No) Satisfaction', 'Rolling Stones Satisfaction'),
+  (1965, 'Tom Jones', 'It''s Not Unusual', null),
+  (1966, 'The Rolling Stones', 'Paint It Black', null),
+  (1966, 'The Beach Boys', 'Good Vibrations', null),
+  (1966, 'Frank Sinatra', 'Strangers in the Night', null),
+  (1966, 'The Monkees', 'I''m a Believer', null),
+  (1967, 'Aretha Franklin', 'Respect', null),
+  (1967, 'Louis Armstrong', 'What a Wonderful World', null),
+  (1967, 'The Doors', 'Light My Fire', null),
+  (1967, 'Procol Harum', 'A Whiter Shade of Pale', null),
+  (1967, 'The Jimi Hendrix Experience', 'Purple Haze', 'Jimi Hendrix Purple Haze'),
+  (1968, 'Otis Redding', '(Sittin'' On) The Dock of the Bay', 'Otis Redding Dock of the Bay'),
+  (1968, 'The Beatles', 'Hey Jude', null),
+  (1969, 'David Bowie', 'Space Oddity', null),
+  (1969, 'Frank Sinatra', 'My Way', null),
+  (1969, 'The Beatles', 'Here Comes the Sun', null),
+  (1970, 'Simon & Garfunkel', 'Bridge over Troubled Water', null),
+  (1970, 'Elton John', 'Your Song', null),
+  (1971, 'John Lennon', 'Imagine', null),
+  (1971, 'Led Zeppelin', 'Stairway to Heaven', null),
+  (1972, 'Elton John', 'Rocket Man', null),
+  (1972, 'Stevie Wonder', 'Superstition', null),
+  (1972, 'Ted Gärdestad', 'Jag vill ha en egen måne', null),
+  (1974, 'ABBA', 'Waterloo', null),
+  (1975, 'ABBA', 'Mamma Mia', null),
+  (1975, 'Queen', 'Bohemian Rhapsody', null),
+  (1976, 'ABBA', 'Dancing Queen', null),
+  (1976, 'Boney M.', 'Daddy Cool', null),
+  (1977, 'Bee Gees', 'Stayin'' Alive', null),
+  (1977, 'Donna Summer', 'I Feel Love', null),
+  (1977, 'Fleetwood Mac', 'Dreams', null),
+  (1977, 'David Bowie', 'Heroes', null),
+  (1977, 'Queen', 'We Will Rock You', null),
+  (1978, 'Boney M.', 'Rivers of Babylon', null),
+  (1978, 'Gloria Gaynor', 'I Will Survive', null),
+  (1978, 'Village People', 'Y.M.C.A.', null),
+  (1978, 'Earth, Wind & Fire', 'September', null),
+  (1978, 'Chic', 'Le Freak', null),
+  (1978, 'Dire Straits', 'Sultans of Swing', null),
+  (1979, 'ABBA', 'Gimme! Gimme! Gimme! (A Man After Midnight)', 'ABBA Gimme Gimme Gimme'),
+  (1979, 'Michael Jackson', 'Don''t Stop ''Til You Get Enough', null),
+  (1979, 'Pink Floyd', 'Another Brick in the Wall, Pt. 2', 'Pink Floyd Another Brick in the Wall'),
+  (1979, 'The Buggles', 'Video Killed the Radio Star', null),
+  (1980, 'ABBA', 'The Winner Takes It All', null),
+  (1980, 'Queen', 'Another One Bites the Dust', null),
+  (1980, 'Bob Marley & The Wailers', 'Could You Be Loved', 'Bob Marley Could You Be Loved'),
+  (1982, 'Gyllene Tider', 'Sommartider', null),
+  (1982, 'Ulf Lundell', 'Öppna landskap', null),
+  (1982, 'Survivor', 'Eye of the Tiger', null),
+  (1982, 'Toto', 'Africa', null),
+  (1983, 'Carola', 'Främling', null),
+  (1983, 'Cyndi Lauper', 'Girls Just Want to Have Fun', null),
+  (1983, 'David Bowie', 'Let''s Dance', null),
+  (1983, 'The Police', 'Every Breath You Take', null),
+  (1983, 'Eurythmics', 'Sweet Dreams (Are Made of This)', 'Eurythmics Sweet Dreams'),
+  (1984, 'Herreys', 'Diggi-Loo Diggi-Ley', null),
+  (1984, 'Madonna', 'Like a Virgin', null),
+  (1984, 'Prince', 'Purple Rain', null),
+  (1984, 'Wham!', 'Wake Me Up Before You Go-Go', null),
+  (1984, 'Wham!', 'Last Christmas', null),
+  (1984, 'Queen', 'Radio Ga Ga', null),
+  (1984, 'Stevie Wonder', 'I Just Called to Say I Love You', null),
+  (1985, 'Dire Straits', 'Money for Nothing', null),
+  (1986, 'Europe', 'The Final Countdown', null),
+  (1986, 'Bon Jovi', 'Livin'' on a Prayer', null),
+  (1986, 'Prince', 'Kiss', null),
+  (1987, 'U2', 'With or Without You', null),
+  (1987, 'Whitney Houston', 'I Wanna Dance with Somebody (Who Loves Me)', 'Whitney Houston I Wanna Dance with Somebody'),
+  (1987, 'Rick Astley', 'Never Gonna Give You Up', null),
+  (1987, 'Madonna', 'La Isla Bonita', null),
+  (1987, 'Michael Jackson', 'Bad', null),
+  (1988, 'Michael Jackson', 'Smooth Criminal', null),
+  (1989, 'Madonna', 'Like a Prayer', null),
+  (1990, 'Madonna', 'Vogue', null),
+  (1990, 'Vanilla Ice', 'Ice Ice Baby', null),
+  (1991, 'Roxette', 'Joyride', null),
+  (1991, 'Eva Dahlgren', 'Vem tänder stjärnorna', null),
+  (1991, 'Carola', 'Fångad av en stormvind', null),
+  (1991, 'Nirvana', 'Smells Like Teen Spirit', null),
+  (1991, 'R.E.M.', 'Losing My Religion', null),
+  (1991, 'Michael Jackson', 'Black or White', null),
+  (1991, 'Metallica', 'Enter Sandman', null),
+  (1992, 'Whitney Houston', 'I Will Always Love You', null),
+  (1992, 'Dr. Alban', 'It''s My Life', null),
+  (1992, 'Ace of Base', 'All That She Wants', null),
+  (1992, 'Lisa Nilsson', 'Himlen runt hörnet', null),
+  (1993, 'Ace of Base', 'The Sign', null),
+  (1993, 'Haddaway', 'What Is Love', null),
+  (1994, 'Rednex', 'Cotton Eye Joe', null),
+  (1994, 'The Cranberries', 'Zombie', null),
+  (1995, 'Oasis', 'Wonderwall', null),
+  (1995, 'Coolio', 'Gangsta''s Paradise', null),
+  (1996, 'The Cardigans', 'Lovefool', null),
+  (1996, 'Spice Girls', 'Wannabe', null),
+  (1997, 'Aqua', 'Barbie Girl', null),
+  (1997, 'Blur', 'Song 2', null),
+  (1997, 'Celine Dion', 'My Heart Will Go On', null),
+  (1997, 'Backstreet Boys', 'Everybody (Backstreet''s Back)', 'Backstreet Boys Everybody'),
+  (1998, 'Britney Spears', '...Baby One More Time', 'Britney Spears Baby One More Time'),
+  (1998, 'Cher', 'Believe', null),
+  (1999, 'Backstreet Boys', 'I Want It That Way', null),
+  (1999, 'Ricky Martin', 'Livin'' la Vida Loca', null),
+  (2000, 'Alcazar', 'Crying at the Discoteque', null),
+  (2000, 'Håkan Hellström', 'Känn ingen sorg för mig Göteborg', null),
+  (2000, 'The Hives', 'Hate to Say I Told You So', null),
+  (2000, 'Daft Punk', 'One More Time', null),
+  (2000, 'Britney Spears', 'Oops!...I Did It Again', 'Britney Spears Oops I Did It Again'),
+  (2000, 'Coldplay', 'Yellow', null),
+  (2000, 'U2', 'Beautiful Day', null),
+  (2002, 'Eminem', 'Without Me', null),
+  (2002, 'Eminem', 'Lose Yourself', null),
+  (1999, 'Kent', 'Musik non stop', null),
+  (2003, 'Beyoncé', 'Crazy in Love', null),
+  (2003, 'OutKast', 'Hey Ya!', null),
+  (2003, 'The White Stripes', 'Seven Nation Army', null),
+  (2004, 'Lena Philipsson', 'Det gör ont', null),
+  (2004, 'The Killers', 'Somebody Told Me', null),
+  (2005, 'Madonna', 'Hung Up', null),
+  (2006, 'Gnarls Barkley', 'Crazy', null),
+  (2006, 'Basshunter', 'Boten Anna', null),
+  (2006, 'Peter Bjorn and John', 'Young Folks', null),
+  (2006, 'Amy Winehouse', 'Rehab', null),
+  (2007, 'Rihanna', 'Umbrella', null),
+  (2008, 'Coldplay', 'Viva la Vida', null),
+  (2008, 'Beyoncé', 'Single Ladies (Put a Ring on It)', 'Beyonce Single Ladies'),
+  (2008, 'Lady Gaga', 'Poker Face', null),
+  (2009, 'The Black Eyed Peas', 'I Gotta Feeling', 'Black Eyed Peas I Gotta Feeling'),
+  (2009, 'Lady Gaga', 'Bad Romance', null),
+  (2009, 'Mando Diao', 'Dance with Somebody', null),
+  (2010, 'Robyn', 'Dancing On My Own', null),
+  (2010, 'Adele', 'Rolling in the Deep', null),
+  (2011, 'Eric Saade', 'Popular', null),
+  (2011, 'Gotye', 'Somebody That I Used to Know', null),
+  (2011, 'Lykke Li', 'I Follow Rivers', null),
+  (2011, 'Avicii', 'Levels', null),
+  (2011, 'Veronica Maggio', 'Jag kommer', null),
+  (2012, 'Loreen', 'Euphoria', null),
+  (2012, 'PSY', 'Gangnam Style', null),
+  (2012, 'Swedish House Mafia', 'Don''t You Worry Child', null),
+  (2012, 'Icona Pop', 'I Love It', null),
+  (2012, 'Laleh', 'Some Die Young', null),
+  (2013, 'Avicii', 'Wake Me Up', null),
+  (2013, 'Daft Punk', 'Get Lucky', null),
+  (2013, 'Pharrell Williams', 'Happy', null),
+  (2014, 'Taylor Swift', 'Shake It Off', null),
+  (2014, 'Mark Ronson', 'Uptown Funk', 'Mark Ronson Uptown Funk Bruno Mars'),
+  (2015, 'Måns Zelmerlöw', 'Heroes', null),
+  (2015, 'Adele', 'Hello', null),
+  (2015, 'Zara Larsson', 'Lush Life', null),
+  (2017, 'Ed Sheeran', 'Shape of You', null),
+  (2017, 'Luis Fonsi', 'Despacito', null),
+  (2018, 'Lewis Capaldi', 'Someone You Loved', null),
+  (2019, 'Billie Eilish', 'bad guy', null),
+  (2019, 'The Weeknd', 'Blinding Lights', null),
+  (2020, 'Dua Lipa', 'Levitating', null),
+  (2021, 'Olivia Rodrigo', 'drivers license', null),
+  (2021, 'Måneskin', 'Zitti e buoni', null),
+  (2022, 'Harry Styles', 'As It Was', null),
+  (2022, 'Cornelia Jakobs', 'Hold Me Closer', null),
+  (2023, 'Miley Cyrus', 'Flowers', null),
+  (2023, 'Loreen', 'Tattoo', null),
+  (2024, 'Sabrina Carpenter', 'Espresso', null),
+  (2024, 'Billie Eilish', 'BIRDS OF A FEATHER', null);
+
+
+-- ---------------------------------------------------------------------
+--  Närmast vinner. Svaret måste vara ett heltal.
+-- ---------------------------------------------------------------------
+
+truncate kb_uppskattningar restart identity;
+
+insert into kb_uppskattningar (emoji, fraga, svar, enhet) values
+  ('🧱', 'Vilket år föll Berlinmuren?', 1989, 'år'),
+  ('🌕', 'Vilket år landade Apollo 11 på månen?', 1969, 'år'),
+  ('🚢', 'Vilket år sjönk Titanic?', 1912, 'år'),
+  ('🇪🇺', 'Vilket år blev Sverige medlem i EU?', 1995, 'år'),
+  ('🪖', 'Vilket år började andra världskriget?', 1939, 'år'),
+  ('🌉', 'Vilket år invigdes Öresundsbron?', 2000, 'år'),
+  ('📱', 'Vilket år kom den första iPhonen?', 2007, 'år'),
+  ('🚗', 'Vilket år gick Sverige över till högertrafik?', 1967, 'år'),
+  ('⛵', 'Vilket år kom Columbus till Amerika?', 1492, 'år'),
+  ('🗼', 'Vilket år invigdes Eiffeltornet?', 1889, 'år'),
+  ('☢️', 'Vilket år inträffade kärnkraftsolyckan i Tjernobyl?', 1986, 'år'),
+  ('🪑', 'Vilket år grundades IKEA?', 1943, 'år'),
+  ('🎤', 'Vilket år hölls den första svenska Melodifestivalen?', 1959, 'år'),
+  ('⚡', 'Vilket år kom den första boken om Harry Potter?', 1997, 'år'),
+  ('🌌', 'Vilket år hade den första Star Wars-filmen premiär?', 1977, 'år'),
+  ('👑', 'Vilket år blev Carl XVI Gustaf kung?', 1973, 'år'),
+  ('🎧', 'Vilket år grundades Spotify?', 2006, 'år'),
+  ('🍔', 'Vilket år öppnade den första McDonald''s-restaurangen i Sverige?', 1973, 'år'),
+  ('🍄', 'Vilket år kom det första Super Mario Bros.-spelet?', 1985, 'år'),
+  ('👍', 'Vilket år startade Facebook?', 2004, 'år'),
+  ('✊', 'Vilket år släpptes Nelson Mandela ur fängelset?', 1990, 'år'),
+  ('🇺🇸', 'Vilket år mördades John F. Kennedy?', 1963, 'år'),
+  ('🦴', 'Hur många ben har en vuxen människa i skelettet?', 206, 'ben'),
+  ('🎹', 'Hur många tangenter har ett vanligt piano?', 88, 'tangenter'),
+  ('🏃', 'Hur många meter är ett maratonlopp?', 42195, 'meter'),
+  ('🕰️', 'Hur många minuter är ett dygn?', 1440, 'minuter'),
+  ('🗺️', 'Hur många landskap har Sverige?', 25, 'landskap'),
+  ('🏛️', 'Hur många län har Sverige?', 21, 'län'),
+  ('🏔️', 'Hur många meter högt är Mount Everest?', 8849, 'meter'),
+  ('🌡️', 'Vid hur många grader Fahrenheit kokar vatten?', 212, '°F'),
+  ('♟️', 'Hur många rutor har ett schackbräde?', 64, 'rutor'),
+  ('🃏', 'Hur många kort har en vanlig kortlek utan jokrar?', 52, 'kort'),
+  ('⏱️', 'Hur många sekunder är en timme?', 3600, 'sekunder'),
+  ('🌕', 'Ungefär hur många kilometer är det från jorden till månen?', 384400, 'km'),
+  ('🇪🇺', 'Hur många stjärnor finns i EU:s flagga?', 12, 'stjärnor'),
+  ('🇺🇸', 'Hur många stjärnor finns i USA:s flagga?', 50, 'stjärnor'),
+  ('🌊', 'Hur många procent av jordens yta täcks av vatten?', 71, '%'),
+  ('📚', 'Hur många år blev Astrid Lindgren?', 94, 'år'),
+  ('🇪🇺', 'Hur många länder är medlemmar i EU?', 27, 'länder'),
+  ('🎿', 'Hur många kilometer är Vasaloppet?', 90, 'km'),
+  ('💡', 'Ungefär hur många kilometer i sekunden färdas ljuset?', 299792, 'km/s'),
+  ('🦷', 'Hur många tänder har en vuxen med alla visdomständer?', 32, 'tänder'),
+  ('🤾', 'Hur många spelare har ett handbollslag på planen, målvakten inräknad?', 7, 'spelare');
+
