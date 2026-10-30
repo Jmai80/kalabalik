@@ -13,6 +13,15 @@ const kolla = (villkor, text) => {
   if (!villkor) misslyckat = true;
 };
 
+// Rum som blivit kvar från tidigare testkörningar tas bort först
+{
+  const pg = (await import("pg")).default;
+  const db = new pg.Client({ host: "/tmp", port: 5444, user: "postgres", database: "kalabalik" });
+  await db.connect();
+  await db.query("delete from kb_rum where vard_id = (select id from auth.users where email = 'vard@test.se')");
+  await db.end();
+}
+
 // ---------- Värden ----------
 const tv = await nySida(browser, { mobil: false, namn: "tv" });
 await tv.goto(`${WEBB}/vard.html`);
